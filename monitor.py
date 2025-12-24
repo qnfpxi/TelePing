@@ -184,7 +184,24 @@ def analyze_results(results: Optional[Dict[str, Any]], threshold: float) -> Tupl
         return None, None, None, 0.0
 
     fail_rate = failed / valid_total
+
+    # 检查是否需要告警（满足任一条件即可）
+    should_alert = False
+
+    # 条件1：全国失败率超过阈值
     if fail_rate > threshold:
+        should_alert = True
+        logging.info("触发全国告警：失败率 %.2f%% > 阈值 %.2f%%", fail_rate * 100, threshold * 100)
+
+    # 条件2：单地区失败节点数 >= 3
+    if not should_alert:
+        for region, count in regions.items():
+            if count >= 3:
+                should_alert = True
+                logging.info("触发区域告警：%s 失败 %d 个节点（≥3）", region, count)
+                break
+
+    if should_alert:
         return operators, regions, error_types, fail_rate
     return None, None, None, fail_rate
 
