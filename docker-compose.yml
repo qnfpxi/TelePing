@@ -1,0 +1,27 @@
+services:
+  teleping:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: teleping:latest
+    container_name: teleping_monitor
+    restart: unless-stopped
+    volumes:
+      # 持久化配置文件（可在宿主机修改）
+      - ./config.json:/app/config.json
+      # 持久化日志文件
+      - ./monitor.log:/app/monitor.log
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('monitor.log') else 1)"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
