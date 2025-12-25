@@ -83,10 +83,30 @@
 
 ---
 
-### 步骤 2：安装依赖
+### 步骤 2：拉取代码
+
+**从 GitHub 克隆项目到本地**：
 
 ```bash
-cd /Users/admin/TelePing
+# 克隆项目
+git clone https://github.com/qnfpxi/TelePing.git
+
+# 进入项目目录
+cd TelePing
+```
+
+**或者更新已有项目**：
+
+```bash
+cd TelePing
+git pull origin main
+```
+
+---
+
+### 步骤 3：安装依赖
+
+```bash
 pip3 install -r requirements.txt
 ```
 
@@ -97,7 +117,7 @@ pip3 install -r requirements.txt
 
 ---
 
-### 步骤 3：配置凭证
+### 步骤 4：配置凭证
 
 编辑 `config.json` 文件，填入你的凭证：
 
@@ -176,9 +196,9 @@ pip3 install -r requirements.txt
 
 ---
 
-### 步骤 4：测试运行
+### 步骤 5：测试运行
 
-#### 4.1 前台测试
+#### 5.1 前台测试
 
 ```bash
 python3 monitor.py
@@ -192,7 +212,7 @@ INFO - 开始新一轮检测
 INFO - 所有站点正常
 ```
 
-#### 4.2 测试 Bot 命令
+#### 5.2 测试 Bot 命令
 
 **个人聊天测试**：
 在 Telegram 中给你的 Bot 发送：
@@ -217,7 +237,7 @@ INFO - 所有站点正常
 - 如果你不在白名单中 → 收到"❌ 无权限操作此 Bot"
 - 查看日志：`tail -f monitor.log | grep "未授权"`
 
-#### 4.3 验证告警
+#### 5.3 验证告警
 
 首次运行会立即检测一次，如果站点正常，不会发送告警。
 
@@ -227,7 +247,7 @@ INFO - 所有站点正常
 
 ---
 
-### 步骤 5：后台运行（生产环境）
+### 步骤 6：后台运行（生产环境）
 
 #### 方法一：Docker 部署（⭐ 强烈推荐）
 

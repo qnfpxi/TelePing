@@ -27,13 +27,21 @@
 2. 获取 `BOT_TOKEN`
 3. 和你的 Bot 聊天一次，访问 `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` 获取 `CHAT_ID`
 
-### 2. 安装依赖
+### 2. 克隆项目
+
+```bash
+# 克隆项目到本地
+git clone https://github.com/qnfpxi/TelePing.git
+cd TelePing
+```
+
+### 3. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 配置
+### 4. 配置
 
 编辑 `config.json`，填入你的凭证：
 
@@ -50,7 +58,7 @@ pip install -r requirements.txt
 }
 ```
 
-### 4. 运行
+### 5. 运行
 
 #### 方式一：Docker 部署（⭐ 推荐）
 
