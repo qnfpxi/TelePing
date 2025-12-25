@@ -428,6 +428,57 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     logging.info(f"批量添加 {len(added_sites)} 个站点: {base_name}")
 
 
+async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telegram /deletemany 命令，批量删除监控站点。
+
+    用法: /deletemany <站点名前缀>
+    示例: /deletemany 官网  (删除所有 官网-1, 官网-2, 官网-3 等)
+    """
+    config = load_config()
+    chat_id = update.effective_chat.id
+
+    # 验证用户权限
+    if not check_user_permission(chat_id, config):
+        await update.message.reply_text("❌ 无权限操作此 Bot")
+        logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "用法: /deletemany <站点名前缀>\n"
+            "示例: /deletemany 官网  (删除所有 官网-1, 官网-2 等)"
+        )
+        return
+
+    prefix = context.args[0]
+    sites = config.get("sites", [])
+
+    # 查找所有匹配前缀的站点（站点名-数字 格式）
+    deleted_sites = []
+    new_sites = []
+
+    for site in sites:
+        site_name = site.get("name", "")
+        # 匹配 "前缀-数字" 格式
+        if site_name.startswith(f"{prefix}-") and site_name[len(prefix)+1:].isdigit():
+            deleted_sites.append(f"• {site_name} → {site.get('url', '')}")
+        else:
+            new_sites.append(site)
+
+    if not deleted_sites:
+        await update.message.reply_text(f"❌ 未找到以 '{prefix}-' 开头的站点")
+        return
+
+    config["sites"] = new_sites
+    save_config(config)
+
+    # 发送成功消息
+    success_msg = "✅ 批量删除成功！\n" + "\n".join(deleted_sites) + f"\n\n共删除 {len(deleted_sites)} 个站点"
+    await update.message.reply_text(success_msg)
+    logging.info(f"批量删除 {len(deleted_sites)} 个站点: {prefix}")
+
+
+
 def start_bot(config: Dict[str, Any]) -> None:
     """启动 Telegram Bot 的轮询线程。"""
     token = config.get("telegram_bot_token")
@@ -440,6 +491,7 @@ def start_bot(config: Dict[str, Any]) -> None:
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("addmany", cmd_addmany))
+    app.add_handler(CommandHandler("deletemany", cmd_deletemany))
 
     bot_thread = threading.Thread(target=app.run_polling, daemon=True)
     bot_thread.start()

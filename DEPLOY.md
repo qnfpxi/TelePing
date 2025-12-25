@@ -198,8 +198,9 @@ INFO - 所有站点正常
 在 Telegram 中给你的 Bot 发送：
 - `/list` - 查看当前监控站点
 - `/add 官网 www.example.com` - 添加站点
-- `/addmany 官网,www.example.com,backup.example.com,cdn.example.com` - 批量添加站点
+- `/addmany 官网,www.example.com,backup.example.com,cdn.example.com` - 批量添加站点（自动编号为 官网-1、官网-2...）
 - `/delete 测试站点` - 删除站点
+- `/deletemany 官网` - 批量删除站点（删除所有 官网-1、官网-2... 等站点）
 
 **群组聊天测试**（如果配置了群组）：
 在群组中发送：
@@ -207,6 +208,7 @@ INFO - 所有站点正常
 - `/add 站点名 网址` - 添加站点（群组内任何人都能看到）
 - `/addmany 站点名,网址1,网址2,网址3` - 批量添加站点（自动编号为 站点名-1、站点名-2...）
 - `/delete 站点名` - 删除站点
+- `/deletemany 站点名` - 批量删除站点（删除所有 站点名-1、站点名-2... 等站点）
 
 **验证权限**：
 - 如果你在白名单中 → 命令正常执行
