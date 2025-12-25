@@ -17,10 +17,12 @@ docker-compose --version
 ### 快速部署
 
 ```bash
-# 1. 克隆或上传项目到服务器
-cd /path/to/TelePing
+# 1. 克隆项目到服务器
+git clone https://github.com/qnfpxi/TelePing.git
+cd TelePing
 
-# 2. 编辑配置文件
+# 2. 复制配置模板并编辑
+cp config.json.example config.json
 vim config.json
 
 # 填入你的凭证：
@@ -30,14 +32,27 @@ vim config.json
 # - 17ce_token
 # - allowed_chat_ids
 
-# 3. 一键启动
+# 3. 一键启动（首次会自动构建镜像）
 docker-compose up -d
 
 # 4. 查看运行状态
 docker-compose ps
 
-# 5. 查看日志
+# 5. 查看实时日志
 docker-compose logs -f
+```
+
+**更新已有项目**：
+```bash
+# 拉取最新代码
+cd TelePing
+git pull origin main
+
+# 重新构建并启动
+docker-compose up -d --build
+
+# 查看日志确认更新成功
+docker-compose logs --tail=50
 ```
 
 ## 📋 常用命令

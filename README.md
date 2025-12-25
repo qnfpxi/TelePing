@@ -63,6 +63,10 @@ pip install -r requirements.txt
 #### 方式一：Docker 部署（⭐ 推荐）
 
 ```bash
+# 配置文件（首次部署）
+cp config.json.example config.json
+vim config.json  # 填入你的凭证
+
 # 一键启动
 docker-compose up -d
 

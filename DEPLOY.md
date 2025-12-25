@@ -270,12 +270,35 @@ sudo yum install -y docker docker-compose
 
 # macOS（使用 Homebrew）
 brew install docker docker-compose
+
+# 或安装 Docker Desktop（推荐）
+# 访问 https://www.docker.com/products/docker-desktop
+```
+
+**获取代码**：
+```bash
+# 方式 1：克隆项目（首次部署）
+git clone https://github.com/qnfpxi/TelePing.git
+cd TelePing
+
+# 方式 2：更新代码（已有项目）
+cd TelePing
+git pull origin main
+```
+
+**配置文件**：
+```bash
+# 复制配置模板（首次部署需要）
+cp config.json.example config.json
+
+# 编辑配置文件，填入你的凭证
+vim config.json
+# 或使用其他编辑器：nano config.json
 ```
 
 **一键启动**：
 ```bash
-# 1. 确保已配置 config.json
-# 2. 启动服务（首次会自动构建镜像）
+# 启动服务（首次会自动构建镜像，约 1-2 分钟）
 docker-compose up -d
 
 # 查看运行状态
