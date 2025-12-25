@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -19,6 +20,9 @@ RETRY_TIMES = 3
 SLEEP_BETWEEN_RETRY = 5
 CHECK_INTERVAL_MINUTES = 15
 
+# 配置文件读写锁，防止并发操作导致数据损坏
+_config_lock = threading.Lock()
+
 
 def setup_logging() -> None:
     """初始化日志配置，记录到文件并输出基本格式。"""
@@ -31,21 +35,23 @@ def setup_logging() -> None:
 
 def load_config() -> Dict[str, Any]:
     """读取配置文件，失败时返回默认结构以保证流程继续运行。"""
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as exc:
-        logging.error("加载配置失败，将使用默认配置: %s", exc)
-        return {"sites": [], "alert_threshold": DEFAULT_THRESHOLD}
+    with _config_lock:
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as exc:
+            logging.error("加载配置失败，将使用默认配置: %s", exc)
+            return {"sites": [], "alert_threshold": DEFAULT_THRESHOLD}
 
 
 def save_config(config: Dict[str, Any]) -> None:
-    """保存配置到文件，失败时记录错误。"""
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4, ensure_ascii=False)
-    except Exception as exc:
-        logging.error("保存配置失败: %s", exc)
+    """保存配置到文件，失败时记录错误。使用文件锁防止并发写入。"""
+    with _config_lock:
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+        except Exception as exc:
+            logging.error("保存配置失败: %s", exc)
 
 
 def call_17ce_api(url: str, config: Dict[str, Any], retries: int = RETRY_TIMES) -> Optional[Dict[str, Any]]:
@@ -77,10 +83,20 @@ def call_17ce_api(url: str, config: Dict[str, Any], retries: int = RETRY_TIMES) 
             }
             response = requests.get(api_url, params=params, timeout=30)
             if response.status_code == 200:
-                return response.json()
-            logging.warning("17CE 返回非 200 状态: %s", response.status_code)
+                try:
+                    return response.json()
+                except ValueError as json_exc:
+                    # JSON 解析失败，记录响应内容片段
+                    body_preview = response.text[:200] if response.text else "(empty)"
+                    logging.error("17CE 返回非 JSON 格式（状态 200）：%s，响应片段：%s", json_exc, body_preview)
+                    # 继续重试
+            else:
+                logging.warning("17CE 返回非 200 状态: %s", response.status_code)
         except Exception as exc:
             logging.warning("17CE 调用失败（第 %s 次）: %s", attempt + 1, exc)
+
+        # 最后一次失败不 sleep，避免浪费时间
+        if attempt < retries - 1:
             time.sleep(SLEEP_BETWEEN_RETRY)
     return None
 
@@ -136,7 +152,15 @@ def analyze_results(results: Optional[Dict[str, Any]], threshold: float) -> Tupl
             logging.warning("跳过异常节点数据: %s", exc)
             continue
 
-        if status != 200 or loss >= 100:
+        # 判定节点是否失败（包含异常 IP 检测）
+        is_failed = (
+            status != 200 or
+            loss >= 100 or
+            response_ip == "0.0.0.0" or
+            response_ip.startswith("127.")
+        )
+
+        if is_failed:
             failed += 1
             if "电信" in isp:
                 operators["电信"] += 1
@@ -374,7 +398,8 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not sites:
         await update.message.reply_text("📋 当前无监控站点")
         return
-    lines = [f"• {s.get('name', '')} → {s.get('url', '')}" for s in sites]
+    # HTML 转义防止注入攻击
+    lines = [f"• {html.escape(s.get('name', ''))} → {html.escape(s.get('url', ''))}" for s in sites]
     await update.message.reply_text(f"📋 <b>当前监控列表</b>（共 {len(sites)} 个站点）\n\n" + "\n".join(lines), parse_mode="HTML")
 
 
