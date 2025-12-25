@@ -325,13 +325,13 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if len(context.args) < 2:
-        await update.message.reply_text("用法: /add <名称> <网址>\n示例: /add 官网 www.example.com")
+        await update.message.reply_text("📝 用法: /add <名称> <网址>\n💡 示例: /add 官网 www.example.com")
         return
     name = context.args[0]
     url = " ".join(context.args[1:])
     config.setdefault("sites", []).append({"name": name, "url": url})
     save_config(config)
-    await update.message.reply_text(f"✅ 添加成功: {name} ({url})")
+    await update.message.reply_text(f"✅ 添加成功\n📌 {name} → {url}")
 
 
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -346,7 +346,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if len(context.args) < 1:
-        await update.message.reply_text("用法: /delete <名称>")
+        await update.message.reply_text("📝 用法: /delete <名称>\n💡 示例: /delete 官网")
         return
     name = context.args[0]
     sites = config.get("sites", [])
@@ -356,7 +356,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     config["sites"] = new_sites
     save_config(config)
-    await update.message.reply_text(f"✅ 删除成功: {name}")
+    await update.message.reply_text(f"🗑️ 删除成功\n📌 {name}")
 
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -372,10 +372,10 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     sites = config.get("sites", [])
     if not sites:
-        await update.message.reply_text("当前无监控站点")
+        await update.message.reply_text("📋 当前无监控站点")
         return
     lines = [f"• {s.get('name', '')} → {s.get('url', '')}" for s in sites]
-    await update.message.reply_text("<b>当前监控列表：</b>\n" + "\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text(f"📋 <b>当前监控列表</b>（共 {len(sites)} 个站点）\n\n" + "\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -395,8 +395,8 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if len(context.args) < 1:
         await update.message.reply_text(
-            "用法: /addmany <站点名>,<网址1>,<网址2>,...\n"
-            "示例: /addmany 官网,www.example.com,backup.example.com"
+            "📝 用法: /addmany <站点名>,<网址1>,<网址2>,...\n"
+            "💡 示例: /addmany 官网,www.example.com,backup.example.com"
         )
         return
 
@@ -423,7 +423,7 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     save_config(config)
 
     # 发送成功消息
-    success_msg = "✅ 批量添加成功！\n" + "\n".join(added_sites) + f"\n\n共添加 {len(added_sites)} 个站点"
+    success_msg = "✅ 批量添加成功！\n\n" + "\n".join(added_sites) + f"\n\n📊 共添加 {len(added_sites)} 个站点"
     await update.message.reply_text(success_msg)
     logging.info(f"批量添加 {len(added_sites)} 个站点: {base_name}")
 
@@ -445,8 +445,8 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if len(context.args) < 1:
         await update.message.reply_text(
-            "用法: /deletemany <站点名前缀>\n"
-            "示例: /deletemany 官网  (删除所有 官网-1, 官网-2 等)"
+            "📝 用法: /deletemany <站点名前缀>\n"
+            "💡 示例: /deletemany 官网  (删除所有 官网-1, 官网-2 等)"
         )
         return
 
@@ -473,10 +473,67 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     save_config(config)
 
     # 发送成功消息
-    success_msg = "✅ 批量删除成功！\n" + "\n".join(deleted_sites) + f"\n\n共删除 {len(deleted_sites)} 个站点"
+    success_msg = "🗑️ 批量删除成功！\n\n" + "\n".join(deleted_sites) + f"\n\n📊 共删除 {len(deleted_sites)} 个站点"
     await update.message.reply_text(success_msg)
     logging.info(f"批量删除 {len(deleted_sites)} 个站点: {prefix}")
 
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telegram /help 命令，显示帮助信息和所有可用命令。"""
+    config = load_config()
+    chat_id = update.effective_chat.id
+
+    # 验证用户权限
+    if not check_user_permission(chat_id, config):
+        await update.message.reply_text("❌ 无权限操作此 Bot")
+        logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
+        return
+
+    help_text = (
+        "🤖 <b>TelePing 监控机器人</b>\n"
+        "基于 17CE API 的多网址全国分布式拨测监控系统\n\n"
+
+        "📋 <b>可用命令：</b>\n\n"
+
+        "➕ <b>添加站点</b>\n"
+        "• /add &#60;名称&#62; &#60;网址&#62;\n"
+        "  添加单个监控站点\n"
+        "  💡 示例: /add 官网 www.example.com\n\n"
+
+        "➕ <b>批量添加</b>\n"
+        "• /addmany &#60;站点名&#62;,&#60;网址1&#62;,&#60;网址2&#62;,...\n"
+        "  批量添加监控站点（自动编号）\n"
+        "  💡 示例: /addmany 官网,www.a.com,www.b.com\n"
+        "  结果: 官网-1, 官网-2 ...\n\n"
+
+        "➖ <b>删除站点</b>\n"
+        "• /delete &#60;名称&#62;\n"
+        "  删除单个监控站点\n"
+        "  💡 示例: /delete 官网\n\n"
+
+        "➖ <b>批量删除</b>\n"
+        "• /deletemany &#60;站点名前缀&#62;\n"
+        "  批量删除自动编号的站点\n"
+        "  💡 示例: /deletemany 官网\n"
+        "  结果: 删除所有 官网-1, 官网-2 ...\n\n"
+
+        "📋 <b>查看列表</b>\n"
+        "• /list\n"
+        "  查看当前所有监控站点\n\n"
+
+        "❓ <b>帮助</b>\n"
+        "• /help\n"
+        "  显示此帮助信息\n\n"
+
+        "⚠️ <b>告警策略</b>（满足任一即触发）：\n"
+        "• 全国失败率 > 20%\n"
+        "• 任意单地区失败节点 ≥ 3 个\n\n"
+
+        "🔍 <b>检测频率</b>：每 15 分钟\n"
+        "📊 <b>监控节点</b>：全国 200+ 节点（电信/联通/移动）"
+    )
+
+    await update.message.reply_text(help_text, parse_mode="HTML")
 
 
 def start_bot(config: Dict[str, Any]) -> None:
@@ -487,6 +544,7 @@ def start_bot(config: Dict[str, Any]) -> None:
         return
 
     app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("list", cmd_list))
