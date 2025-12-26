@@ -292,7 +292,7 @@ def analyze_results(results: Optional[Dict[str, Any]], threshold: float) -> Tupl
 
     for node in data:
         try:
-            # 安全地提取和转换字段
+            # 安全地提取和转换字段（新数据结构）
             status_raw = node.get("status", 0)
             loss_raw = node.get("loss", 0)
 
@@ -307,12 +307,18 @@ def analyze_results(results: Optional[Dict[str, Any]], threshold: float) -> Tupl
             except (ValueError, TypeError):
                 loss = 0
 
-            isp = str(node.get("isp_name") or node.get("isp") or "")
-            # 获取响应IP（可能的字段名）
-            response_ip = str(node.get("ip") or node.get("serverip") or node.get("server_ip") or "")
-            # 获取地区信息（优先使用省份，其次城市）
-            region = str(node.get("province_name") or node.get("province") or
-                        node.get("city_name") or node.get("city") or "未知")
+            # 从 NodeInfo 中提取运营商ID，转换为中文名称
+            node_info = node.get("NodeInfo", {}) or {}
+            isp_id = str(node_info.get("isp", ""))
+            isp_map = {"1": "电信", "2": "联通", "7": "移动"}
+            isp = isp_map.get(isp_id, "其他")
+
+            # 获取响应IP（SrcIP 字段）
+            response_ip = str(node.get("SrcIP", ""))
+
+            # 获取测速点地区信息（从 srcip.srcip_from）
+            srcip_info = node.get("srcip", {}) or {}
+            region = str(srcip_info.get("srcip_from", "未知"))
         except Exception as exc:
             # 跳过异常节点并记录
             skipped += 1
@@ -428,9 +434,12 @@ def analyze_results_detailed(results: Optional[Dict[str, Any]]) -> Tuple[float, 
             except (ValueError, TypeError):
                 loss = 0
 
-            response_ip = str(node.get("ip") or node.get("serverip") or node.get("server_ip") or "")
-            region = str(node.get("province_name") or node.get("province") or
-                        node.get("city_name") or node.get("city") or "未知")
+            # 获取响应IP（SrcIP 字段）
+            response_ip = str(node.get("SrcIP", ""))
+
+            # 获取测速点地区信息（从 srcip.srcip_from）
+            srcip_info = node.get("srcip", {}) or {}
+            region = str(srcip_info.get("srcip_from", "未知"))
 
             # 判定节点是否失败
             is_failed = (
