@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import schedule
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 CONFIG_FILE = "config.json"
@@ -561,6 +561,23 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text, parse_mode="HTML")
 
 
+async def setup_bot_commands(app: Application) -> None:
+    """设置Bot命令菜单，用户输入 / 时显示。"""
+    commands = [
+        BotCommand("help", "📖 显示帮助信息"),
+        BotCommand("list", "📋 查看监控站点列表"),
+        BotCommand("add", "➕ 添加单个监控站点"),
+        BotCommand("addmany", "➕ 批量添加监控站点"),
+        BotCommand("delete", "➖ 删除单个监控站点"),
+        BotCommand("deletemany", "➖ 批量删除监控站点"),
+    ]
+    try:
+        await app.bot.set_my_commands(commands)
+        logging.info("Bot命令菜单设置成功")
+    except Exception as exc:
+        logging.error("Bot命令菜单设置失败: %s", exc)
+
+
 def start_bot(config: Dict[str, Any]) -> Optional[Application]:
     """构建并返回 Telegram Bot Application 对象，由主线程运行。"""
     token = config.get("telegram_bot_token")
@@ -575,6 +592,9 @@ def start_bot(config: Dict[str, Any]) -> Optional[Application]:
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("addmany", cmd_addmany))
     app.add_handler(CommandHandler("deletemany", cmd_deletemany))
+
+    # 设置启动后的命令菜单初始化
+    app.post_init = setup_bot_commands
 
     logging.info("Telegram Bot 已配置，准备在主线程运行")
     return app
