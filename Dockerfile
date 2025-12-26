@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制应用代码
 COPY monitor.py .
+COPY city_nodes_config.py .
 COPY config.json .
 
 # 创建日志文件
