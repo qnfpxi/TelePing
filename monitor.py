@@ -230,6 +230,71 @@ def analyze_results(results: Optional[Dict[str, Any]], threshold: float) -> Tupl
     return None, None, None, fail_rate
 
 
+def analyze_results_detailed(results: Optional[Dict[str, Any]]) -> Tuple[float, Dict[str, int], str]:
+    """解析 17CE 返回结果，返回详细检测状态（用于 /check 命令）。
+
+    返回: (失败率, 地区分布字典, 状态描述)
+    """
+    if not results or "data" not in results:
+        return 0.0, {}, "❌ API调用失败"
+
+    data = results.get("data", [])
+    if not isinstance(data, list) or len(data) == 0:
+        return 0.0, {}, "❌ 无检测数据"
+
+    total = len(data)
+    failed = 0
+    regions: Dict[str, int] = {}
+
+    for node in data:
+        try:
+            status_raw = node.get("status", 0)
+            loss_raw = node.get("loss", 0)
+
+            try:
+                status = int(status_raw) if status_raw not in (None, "", "--") else 0
+            except (ValueError, TypeError):
+                status = 0
+
+            try:
+                loss = float(loss_raw) if loss_raw not in (None, "", "--") else 0
+            except (ValueError, TypeError):
+                loss = 0
+
+            response_ip = str(node.get("ip") or node.get("serverip") or node.get("server_ip") or "")
+            region = str(node.get("province_name") or node.get("province") or
+                        node.get("city_name") or node.get("city") or "未知")
+
+            # 判定节点是否失败
+            is_failed = (
+                status != 200 or
+                loss >= 100 or
+                response_ip == "0.0.0.0" or
+                response_ip.startswith("127.")
+            )
+
+            if is_failed:
+                failed += 1
+                regions[region] = regions.get(region, 0) + 1
+        except Exception:
+            continue
+
+    fail_rate = failed / total if total > 0 else 0.0
+
+    # 生成状态描述
+    if fail_rate >= 0.20:
+        status_emoji = "❌"
+        status_text = "异常"
+    elif fail_rate >= 0.10:
+        status_emoji = "⚠️"
+        status_text = "警告"
+    else:
+        status_emoji = "✅"
+        status_text = "正常"
+
+    return fail_rate, regions, f"{status_emoji} {status_text}"
+
+
 def send_alert(message: str, config: Dict[str, Any]) -> None:
     """通过 Telegram 发送告警消息。"""
     token = config.get("telegram_bot_token")
@@ -579,6 +644,174 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logging.info(f"批量删除 {len(deleted_sites)} 个站点")
 
 
+async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telegram /check 命令，检测所有站点并返回详细报告。"""
+    config = load_config()
+    chat_id = update.effective_chat.id
+
+    # 验证用户权限
+    if not check_user_permission(chat_id, config):
+        await update.message.reply_text("❌ 无权限操作此 Bot")
+        logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
+        return
+
+    sites = config.get("sites", [])
+    if not sites:
+        await update.message.reply_text("📋 当前无监控站点，请先使用 /add 添加站点")
+        return
+
+    # 发送进度提示
+    progress_msg = await update.message.reply_text(
+        f"🔍 检测中，请稍候...\n📊 正在检测 {len(sites)} 个站点"
+    )
+
+    # 收集检测结果
+    results = []
+    normal_count = 0
+    warning_count = 0
+    error_count = 0
+    start_time = time.time()
+
+    for idx, site in enumerate(sites, 1):
+        # 超时保护：检测总时长不超过3分钟
+        elapsed = time.time() - start_time
+        if elapsed > 180:  # 3分钟
+            await progress_msg.edit_text(
+                f"⏱️ 检测超时（已检测 {idx-1}/{len(sites)} 个站点）\n"
+                f"已检测站点结果将在下方显示"
+            )
+            break
+
+        name = site.get("name", "未知")
+        url = site.get("url", "")
+        if not url:
+            continue
+
+        # 调用17CE API
+        api_result = call_17ce_api(url, config)
+        fail_rate, regions, status = analyze_results_detailed(api_result)
+
+        # 分类统计
+        if fail_rate >= 0.20:
+            error_count += 1
+        elif fail_rate >= 0.10:
+            warning_count += 1
+        else:
+            normal_count += 1
+
+        # 构建地区信息
+        region_text = ""
+        if regions:
+            sorted_regions = sorted(regions.items(), key=lambda x: x[1], reverse=True)[:3]
+            region_text = " | " + " ".join([f"{r[0]}({r[1]})" for r in sorted_regions])
+
+        results.append({
+            "name": name,
+            "url": url,
+            "fail_rate": fail_rate,
+            "status": status,
+            "region_text": region_text
+        })
+
+    # 删除进度消息
+    try:
+        await progress_msg.delete()
+    except Exception:
+        pass
+
+    # 生成报告
+    total_checked = len(results)
+    report_lines = [
+        f"🔍 <b>检测报告</b>",
+        f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+    ]
+
+    # 根据站点数量决定显示方式
+    if total_checked <= 6:
+        # 显示所有站点详情
+        for r in results:
+            report_lines.append(
+                f"{r['status']} <b>{html.escape(r['name'])}</b> ({html.escape(r['url'])})\n"
+                f"   失败率: {r['fail_rate']:.1%}{r['region_text']}\n"
+            )
+    else:
+        # 只显示异常和警告站点
+        report_lines.append(f"📊 <b>概览</b>")
+        report_lines.append(f"✅ 正常: {normal_count} | ⚠️ 警告: {warning_count} | ❌ 异常: {error_count}\n")
+
+        # 显示异常和警告站点
+        abnormal_results = [r for r in results if r['fail_rate'] >= 0.10]
+        if abnormal_results:
+            report_lines.append(f"<b>⚠️ 需要关注的站点：</b>\n")
+            for r in abnormal_results:
+                report_lines.append(
+                    f"{r['status']} <b>{html.escape(r['name'])}</b> ({html.escape(r['url'])})\n"
+                    f"   失败率: {r['fail_rate']:.1%}{r['region_text']}\n"
+                )
+        else:
+            report_lines.append("✅ 所有站点运行正常")
+
+    report_lines.append(f"\n📊 总计: {total_checked} 个站点")
+
+    await update.message.reply_text("\n".join(report_lines), parse_mode="HTML")
+    logging.info(f"执行 /check 命令，检测 {total_checked} 个站点")
+
+
+async def cmd_checkone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telegram /checkone 命令，检测单个站点。"""
+    config = load_config()
+    chat_id = update.effective_chat.id
+
+    # 验证用户权限
+    if not check_user_permission(chat_id, config):
+        await update.message.reply_text("❌ 无权限操作此 Bot")
+        logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "📝 用法: /checkone <网址>\n"
+            "💡 示例: /checkone www.example.com"
+        )
+        return
+
+    url = " ".join(context.args)
+
+    # 发送进度提示
+    progress_msg = await update.message.reply_text(f"🔍 正在检测 {url}...")
+
+    # 调用17CE API
+    api_result = call_17ce_api(url, config)
+    fail_rate, regions, status = analyze_results_detailed(api_result)
+
+    # 删除进度消息
+    try:
+        await progress_msg.delete()
+    except Exception:
+        pass
+
+    # 生成报告
+    report_lines = [
+        f"🔍 <b>单站点检测报告</b>",
+        f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+        f"🌐 网址: {html.escape(url)}",
+        f"📊 失败率: {fail_rate:.2%}",
+        f"🏷️ 状态: {status}\n"
+    ]
+
+    # 添加地区详情
+    if regions:
+        sorted_regions = sorted(regions.items(), key=lambda x: x[1], reverse=True)[:10]
+        report_lines.append("<b>受影响地区：</b>")
+        for region, count in sorted_regions:
+            report_lines.append(f"• {html.escape(region)}: {count} 个节点")
+    else:
+        report_lines.append("✅ 所有地区检测正常")
+
+    await update.message.reply_text("\n".join(report_lines), parse_mode="HTML")
+    logging.info(f"执行 /checkone 命令，检测 {url}")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram /help 命令，显示帮助信息和所有可用命令。"""
     config = load_config()
@@ -631,6 +864,16 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /list\n"
         "  查看当前所有监控站点\n\n"
 
+        "🔍 <b>立即检测</b>\n"
+        "• /check\n"
+        "  检测所有站点并返回详细报告\n"
+        "  ✅ 正常 (&lt;10%) | ⚠️ 警告 (10-20%) | ❌ 异常 (&gt;20%)\n\n"
+
+        "🎯 <b>单站点检测</b>\n"
+        "• /checkone &#60;网址&#62;\n"
+        "  检测单个站点的详细状态\n"
+        "  💡 示例: /checkone www.example.com\n\n"
+
         "❓ <b>帮助</b>\n"
         "• /help\n"
         "  显示此帮助信息\n\n"
@@ -650,6 +893,8 @@ async def setup_bot_commands(app: Application) -> None:
     """设置Bot命令菜单，用户输入 / 时显示。"""
     commands = [
         BotCommand("help", "💡 使用帮助"),
+        BotCommand("check", "🔍 检测所有站点"),
+        BotCommand("checkone", "🎯 检测单个站点"),
         BotCommand("list", "📊 站点列表"),
         BotCommand("add", "➕ 添加站点"),
         BotCommand("addmany", "📦 批量添加"),
@@ -672,9 +917,11 @@ def start_bot(config: Dict[str, Any]) -> Optional[Application]:
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("checkone", cmd_checkone))
+    app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("delete", cmd_delete))
-    app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("addmany", cmd_addmany))
     app.add_handler(CommandHandler("deletemany", cmd_deletemany))
 
