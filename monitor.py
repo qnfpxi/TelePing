@@ -564,12 +564,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def setup_bot_commands(app: Application) -> None:
     """设置Bot命令菜单，用户输入 / 时显示。"""
     commands = [
-        BotCommand("help", "📖 显示帮助信息"),
-        BotCommand("list", "📋 查看监控站点列表"),
-        BotCommand("add", "➕ 添加单个监控站点"),
-        BotCommand("addmany", "➕ 批量添加监控站点"),
-        BotCommand("delete", "➖ 删除单个监控站点"),
-        BotCommand("deletemany", "➖ 批量删除监控站点"),
+        BotCommand("help", "💡 使用帮助"),
+        BotCommand("list", "📊 站点列表"),
+        BotCommand("add", "➕ 添加站点"),
+        BotCommand("addmany", "📦 批量添加"),
+        BotCommand("delete", "🗑️ 删除站点"),
+        BotCommand("deletemany", "💥 批量删除"),
     ]
     try:
         await app.bot.set_my_commands(commands)
