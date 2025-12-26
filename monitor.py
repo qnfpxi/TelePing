@@ -16,7 +16,7 @@ from telegram import BotCommand, Message, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # 导入城市节点配置
-from city_nodes_config import get_node_config, MAJOR_CITIES
+from city_nodes_config import get_node_config
 
 CONFIG_FILE = "config.json"
 LOG_FILE = "monitor.log"
