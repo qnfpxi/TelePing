@@ -406,8 +406,17 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram /addmany 命令，批量添加监控站点。
 
-    用法: /addmany 站点名,网址1,网址2,网址3,...
-    示例: /addmany 官网,www.example.com,backup.example.com,cdn.example.com
+    用法:
+    /addmany 站点名
+    网址1
+    网址2
+    网址3
+
+    示例:
+    /addmany 官网
+    www.example.com
+    backup.example.com
+    cdn.example.com
     """
     config = load_config()
     chat_id = update.effective_chat.id
@@ -418,23 +427,46 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
-    if len(context.args) < 1:
+    # 解析多行消息
+    message_text = update.message.text.strip()
+    lines = [line.strip() for line in message_text.split("\n") if line.strip()]
+
+    # 第一行是命令，第二行是站点名，后续是网址
+    if len(lines) < 3:
         await update.message.reply_text(
-            "📝 用法: /addmany <站点名>,<网址1>,<网址2>,...\n"
-            "💡 示例: /addmany 官网,www.example.com,backup.example.com"
+            "📝 用法:\n"
+            "/addmany 站点名\n"
+            "网址1\n"
+            "网址2\n\n"
+            "💡 示例:\n"
+            "/addmany 官网\n"
+            "www.example.com\n"
+            "backup.example.com"
         )
         return
 
-    # 解析参数：站点名,网址1,网址2,...
-    arg_str = " ".join(context.args)
-    parts = [p.strip() for p in arg_str.split(",")]
-
-    if len(parts) < 2:
-        await update.message.reply_text("❌ 至少需要提供站点名和一个网址")
+    # 提取站点名（可能在第一行或第二行）
+    if lines[0].startswith("/addmany"):
+        # 检查命令行是否包含站点名
+        cmd_parts = lines[0].split(maxsplit=1)
+        if len(cmd_parts) > 1:
+            # /addmany 站点名 在同一行
+            base_name = cmd_parts[1]
+            urls = lines[1:]
+        else:
+            # 站点名在第二行
+            if len(lines) < 3:
+                await update.message.reply_text("❌ 至少需要提供站点名和一个网址")
+                return
+            base_name = lines[1]
+            urls = lines[2:]
+    else:
+        await update.message.reply_text("❌ 命令格式错误")
         return
 
-    base_name = parts[0]
-    urls = parts[1:]
+    if not urls:
+        await update.message.reply_text("❌ 至少需要提供一个网址")
+        return
 
     # 批量添加站点
     added_sites = []
@@ -456,8 +488,17 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram /deletemany 命令，批量删除监控站点。
 
-    用法: /deletemany <站点名前缀>
-    示例: /deletemany 官网  (删除所有 官网-1, 官网-2, 官网-3 等)
+    用法:
+    /deletemany
+    站点名1
+    站点名2
+    站点名3
+
+    示例:
+    /deletemany
+    官网-1
+    官网-2
+    官网-3
     """
     config = load_config()
     chat_id = update.effective_chat.id
@@ -468,30 +509,65 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
-    if len(context.args) < 1:
+    # 解析多行消息
+    message_text = update.message.text.strip()
+    lines = [line.strip() for line in message_text.split("\n") if line.strip()]
+
+    # 第一行是命令，后续是要删除的站点名
+    if len(lines) < 2:
         await update.message.reply_text(
-            "📝 用法: /deletemany <站点名前缀>\n"
-            "💡 示例: /deletemany 官网  (删除所有 官网-1, 官网-2 等)"
+            "📝 用法:\n"
+            "/deletemany\n"
+            "站点名1\n"
+            "站点名2\n\n"
+            "💡 示例:\n"
+            "/deletemany\n"
+            "官网-1\n"
+            "官网-2"
         )
         return
 
-    prefix = context.args[0]
-    sites = config.get("sites", [])
+    # 提取要删除的站点名列表
+    if lines[0].startswith("/deletemany"):
+        # 检查命令行是否包含站点名
+        cmd_parts = lines[0].split(maxsplit=1)
+        if len(cmd_parts) > 1:
+            # /deletemany 站点名 在同一行（兼容旧格式，作为前缀匹配）
+            prefix = cmd_parts[1]
+            delete_names = []
+            # 查找所有匹配前缀的站点
+            sites = config.get("sites", [])
+            for site in sites:
+                site_name = site.get("name", "")
+                if site_name.startswith(f"{prefix}-") and site_name[len(prefix)+1:].isdigit():
+                    delete_names.append(site_name)
+        else:
+            # 站点名在后续行
+            delete_names = lines[1:]
+    else:
+        await update.message.reply_text("❌ 命令格式错误")
+        return
 
-    # 查找所有匹配前缀的站点（站点名-数字 格式）
+    if not delete_names:
+        await update.message.reply_text("❌ 至少需要提供一个站点名")
+        return
+
+    sites = config.get("sites", [])
     deleted_sites = []
     new_sites = []
 
+    # 创建要删除的站点名集合，便于快速查找
+    delete_set = set(delete_names)
+
     for site in sites:
         site_name = site.get("name", "")
-        # 匹配 "前缀-数字" 格式
-        if site_name.startswith(f"{prefix}-") and site_name[len(prefix)+1:].isdigit():
+        if site_name in delete_set:
             deleted_sites.append(f"• {site_name} → {site.get('url', '')}")
         else:
             new_sites.append(site)
 
     if not deleted_sites:
-        await update.message.reply_text(f"❌ 未找到以 '{prefix}-' 开头的站点")
+        await update.message.reply_text(f"❌ 未找到匹配的站点")
         return
 
     config["sites"] = new_sites
@@ -500,7 +576,7 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # 发送成功消息
     success_msg = "🗑️ 批量删除成功！\n\n" + "\n".join(deleted_sites) + f"\n\n📊 共删除 {len(deleted_sites)} 个站点"
     await update.message.reply_text(success_msg)
-    logging.info(f"批量删除 {len(deleted_sites)} 个站点: {prefix}")
+    logging.info(f"批量删除 {len(deleted_sites)} 个站点")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -525,10 +601,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  添加单个监控站点\n"
         "  💡 示例: /add 官网 www.example.com\n\n"
 
-        "➕ <b>批量添加</b>\n"
-        "• /addmany &#60;站点名&#62;,&#60;网址1&#62;,&#60;网址2&#62;,...\n"
+        "📦 <b>批量添加</b>\n"
+        "• /addmany &#60;站点名&#62;\n"
+        "  &#60;网址1&#62;\n"
+        "  &#60;网址2&#62;\n"
         "  批量添加监控站点（自动编号）\n"
-        "  💡 示例: /addmany 官网,www.a.com,www.b.com\n"
+        "  💡 示例:\n"
+        "  /addmany 官网\n"
+        "  www.a.com\n"
+        "  www.b.com\n"
         "  结果: 官网-1, 官网-2 ...\n\n"
 
         "➖ <b>删除站点</b>\n"
@@ -536,11 +617,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  删除单个监控站点\n"
         "  💡 示例: /delete 官网\n\n"
 
-        "➖ <b>批量删除</b>\n"
-        "• /deletemany &#60;站点名前缀&#62;\n"
-        "  批量删除自动编号的站点\n"
-        "  💡 示例: /deletemany 官网\n"
-        "  结果: 删除所有 官网-1, 官网-2 ...\n\n"
+        "💥 <b>批量删除</b>\n"
+        "• /deletemany\n"
+        "  &#60;站点名1&#62;\n"
+        "  &#60;站点名2&#62;\n"
+        "  批量删除指定站点\n"
+        "  💡 示例:\n"
+        "  /deletemany\n"
+        "  官网-1\n"
+        "  官网-2\n\n"
 
         "📋 <b>查看列表</b>\n"
         "• /list\n"
