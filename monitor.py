@@ -141,6 +141,10 @@ def load_config() -> Dict[str, Any]:
             logging.error("加载配置失败，将使用默认配置: %s", exc)
             config = {"sites": [], "alert_threshold": DEFAULT_THRESHOLD}
 
+        if not isinstance(config, dict):
+            logging.error("配置文件顶层不是字典类型，已使用默认配置")
+            config = {"sites": [], "alert_threshold": DEFAULT_THRESHOLD}
+
         # 校验必填字段缺失时兜底为空字符串，避免后续功能报错
         required_keys = ["17ce_username", "17ce_token", "telegram_bot_token", "telegram_chat_id"]
         for key in required_keys:
@@ -677,6 +681,10 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     url_or_domain = " ".join(context.args)
     sites = config.get("sites", [])
+    if not isinstance(sites, list):
+        logging.error("配置中的 sites 不是列表类型，已重置为空列表")
+        sites = []
+    config["sites"] = sites
 
     # 查找匹配的站点
     deleted_sites = []
@@ -719,6 +727,10 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     sites = config.get("sites", [])
+    if not isinstance(sites, list):
+        logging.error("配置中的 sites 不是列表类型，已重置为空列表")
+        sites = []
+    config["sites"] = sites
     if not sites:
         reply = await update.message.reply_text("📋 当前无监控站点")
         asyncio.create_task(auto_delete_message(reply))
@@ -925,6 +937,10 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     sites = config.get("sites", [])
+    if not isinstance(sites, list):
+        logging.error("配置中的 sites 不是列表类型，已重置为空列表")
+        sites = []
+    config["sites"] = sites
     if not sites:
         reply = await update.message.reply_text("📋 当前无监控站点，请先使用 /add 添加站点")
         asyncio.create_task(auto_delete_message(reply))
