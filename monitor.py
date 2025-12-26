@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import html
@@ -6,20 +7,23 @@ import logging
 import re
 import threading
 import time
-from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import schedule
-from telegram import BotCommand, Update
+import websocket
+from telegram import BotCommand, Message, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+# 导入城市节点配置
+from city_nodes_config import get_node_config, MAJOR_CITIES
 
 CONFIG_FILE = "config.json"
 LOG_FILE = "monitor.log"
 DEFAULT_THRESHOLD = 0.20
 RETRY_TIMES = 3
 SLEEP_BETWEEN_RETRY = 5
-CHECK_INTERVAL_MINUTES = 15
+AUTO_DELETE_SECONDS = 60  # Bot消息自动删除时间（秒）
 
 # 配置文件读写锁，防止并发操作导致数据损坏
 _config_lock = threading.Lock()
@@ -43,6 +47,26 @@ def extract_domain_from_url(url: str) -> str:
     # 移除 www. 前缀
     url = re.sub(r'^www\.', '', url)
     return url.strip()
+
+
+def normalize_url(url: str) -> str:
+    """标准化URL，确保有协议前缀。
+
+    Args:
+        url: 原始URL（可能没有协议）
+
+    Returns:
+        标准化的URL（确保有https://协议）
+
+    示例:
+        www.example.com → https://www.example.com
+        example.com → https://example.com
+        https://example.com → https://example.com
+    """
+    url = url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = f'https://{url}'
+    return url
 
 
 def generate_unique_name(base_name: str, existing_sites: List[Dict[str, Any]]) -> str:
@@ -128,66 +152,135 @@ def save_config(config: Dict[str, Any]) -> None:
 
 
 def call_17ce_api(url: str, config: Dict[str, Any], retries: int = RETRY_TIMES) -> Optional[Dict[str, Any]]:
-    """调用 17CE API，包含简单重试与签名逻辑。"""
+    """调用 17CE WebSocket API 进行实时测速。"""
     username = config.get("17ce_username")
     token = config.get("17ce_token")
     if not username or not token:
         logging.error("17CE 凭证未配置")
         return None
 
-    for attempt in range(retries):
-        try:
-            ut = int(time.time())
-            pwd_md5 = hashlib.md5(token.encode("utf-8")).hexdigest()[3:22]
-            sign_str = f"{pwd_md5}{username}{ut}"
-            sign_bytes = base64.b64encode(sign_str.encode("utf-8"))
-            sign = hashlib.md5(sign_bytes).hexdigest()
+    normalized_url = normalize_url(url)
 
-            api_url = "https://api.17ce.com/get.php"
-            params = {
-                "url": url,
-                "host": url,
-                "pro_ids": "",          # 为空表示全省份
-                "isp_ids": "1,2,3",     # 1电信 2联通 3移动
-                "num": 1,
-                "username": username,
-                "ut": ut,
-                "sign": sign,
-            }
-            response = requests.get(api_url, params=params, timeout=30)
-            if response.status_code == 200:
+    for attempt in range(retries):
+        ws = None
+        try:
+            # 生成认证签名（md5(token)[4:23] 与官方一致）
+            ut = str(int(time.time()))
+            pwd_md5 = hashlib.md5(token.encode()).hexdigest()[4:23]
+            code = hashlib.md5(
+                base64.b64encode((pwd_md5 + username + ut).encode())
+            ).hexdigest()
+
+            # 连接 WebSocket（在 URL 上附带认证参数，官方示例方式）
+            ws_url = f"wss://wsapi.17ce.com:8001/socket/?ut={ut}&code={code}&user={username}"
+            ws = websocket.create_connection(ws_url, timeout=30, sslopt={"cert_reqs": 0})
+            logging.info(f"17CE WebSocket 已连接 (第{attempt+1}次) {normalized_url}")
+
+            # 发送测速请求（全国主要城市覆盖配置）
+            txnid = int(time.time())
+
+            # 获取城市节点配置
+            node_config = get_node_config()
+
+            test_msg = json.dumps({
+                "txnid": txnid,
+                "nodetype": node_config["nodetype"],  # [1, 2] IDC + 路由器
+                "num": node_config["num"],            # 城市数 × 2 (每城IDC+路由器各1)
+                "TestType": "HTTP",
+                "Url": normalized_url,
+                "TimeOut": 20,
+                "Request": "GET",
+                "NoCache": True,
+                "type": 1,
+                "isps": node_config["isps"],          # [1, 2, 7] 电信、联通、移动
+                "areas": node_config["areas"],        # [1] 大陆地区
+                "pro_ids": node_config["pro_ids"]     # 省份ID列表（city_ids 不在官方示例中，已移除）
+            })
+            logging.info(f"17CE 测速请求JSON（覆盖{len(MAJOR_CITIES)}个主要城市，{node_config['num']}个节点）: {test_msg}")
+            ws.send(test_msg)
+            logging.info(f"17CE 已发送测速请求: {normalized_url} (txnid={txnid})")
+
+            data_list: List[Dict[str, Any]] = []
+            start_time = time.time()
+            total_timeout = 60  # 总超时时间，避免无限等待
+
+            while time.time() - start_time < total_timeout:
+                ws.settimeout(5)
                 try:
-                    return response.json()
-                except ValueError as json_exc:
-                    # JSON 解析失败，记录响应内容片段
-                    body_preview = response.text[:200] if response.text else "(empty)"
-                    logging.error("17CE 返回非 JSON 格式（状态 200）：%s，响应片段：%s", json_exc, body_preview)
-                    # 继续重试
-            else:
-                logging.warning("17CE 返回非 200 状态: %s", response.status_code)
+                    raw_msg = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    continue
+                except websocket.WebSocketConnectionClosedException:
+                    logging.error("17CE WebSocket 连接已关闭")
+                    break
+                except Exception as exc:
+                    logging.warning("17CE WebSocket 接收异常: %s", exc)
+                    break
+
+                try:
+                    resp = json.loads(raw_msg)
+                except ValueError as exc:
+                    logging.warning("17CE WebSocket 消息解析失败: %s", exc)
+                    continue
+
+                msg_type = str(resp.get("type") or "")
+                if msg_type == "TaskAccept":
+                    logging.info(f"17CE 任务已接受 (txnid={txnid})")
+                elif msg_type == "NewData":
+                    node_data = resp.get("data", {}) or {}
+                    if isinstance(node_data, dict):
+                        node_data["status"] = node_data.get("HttpCode", 0)
+                        node_data["loss"] = node_data.get("Loss", 0)
+                        data_list.append(node_data)
+                    else:
+                        logging.info("17CE 收到非字典节点数据，已忽略")
+                elif msg_type == "TaskEnd":
+                    logging.info(f"17CE 检测完成，获得 {len(data_list)} 个节点数据")
+                    return {"data": data_list}
+                elif msg_type == "TaskErr":
+                    logging.error(f"17CE 任务失败: {resp.get('error')}")
+                    break
+                else:
+                    logging.info(f"17CE 收到消息类型: {msg_type}, 完整消息: {resp}")
+
+            logging.error("17CE WebSocket 接收超时或任务未完成")
+
         except Exception as exc:
             logging.warning("17CE 调用失败（第 %s 次）: %s", attempt + 1, exc)
+        finally:
+            if ws:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
 
-        # 最后一次失败不 sleep，避免浪费时间
         if attempt < retries - 1:
             time.sleep(SLEEP_BETWEEN_RETRY)
+
+    logging.error(f"17CE API 调用最终失败，已重试 {retries} 次: {normalized_url}")
     return None
 
 
 def analyze_results(results: Optional[Dict[str, Any]], threshold: float) -> Tuple[Optional[Dict[str, int]], Optional[Dict[str, int]], Optional[Dict[str, Dict[str, int]]], float]:
-    """解析 17CE 返回结果，计算失败率并识别受影响运营商、地区和异常类型。"""
+    """解析 17CE 返回结果，计算失败率并识别受影响运营商、地区和异常类型。
+
+    返回 (None, None, None, -1.0) 表示API数据无效，调用方应将其视为API失败。
+    """
+    # 检查结果是否为空或缺少data字段
     if not results or "data" not in results:
-        return None, None, None, 0.0
+        logging.error("17CE API 返回数据缺少 data 字段")
+        return None, None, None, -1.0  # -1.0 表示API失败
 
     data = results.get("data", [])
     # 验证 data 是否为列表
     if not isinstance(data, list):
         logging.error("17CE 返回的 data 不是列表类型: %s", type(data))
-        return None, None, None, 0.0
+        return None, None, None, -1.0  # -1.0 表示API失败
 
     total = len(data)
     if total == 0:
-        return None, None, None, 0.0
+        logging.warning("17CE 返回的 data 为空列表")
+        return None, None, None, -1.0  # -1.0 表示API失败
 
     failed = 0
     skipped = 0
@@ -430,6 +523,13 @@ def monitor_all() -> None:
             continue
 
         operators, regions, error_types, fail_rate = analyze_results(results, threshold)
+
+        # fail_rate为-1.0表示API返回数据无效
+        if fail_rate < 0:
+            api_failures.append(name)
+            logging.error("站点 %s API返回数据无效", name)
+            continue
+
         if operators and regions and error_types:
             # HTML转义所有动态字段防止注入
             safe_name = html.escape(name)
@@ -475,6 +575,21 @@ def check_user_permission(chat_id: int, config: Dict[str, Any]) -> bool:
     return str(chat_id) in [str(id) for id in allowed_ids]
 
 
+async def auto_delete_message(message: Message, delay: int = AUTO_DELETE_SECONDS) -> None:
+    """自动删除消息，防止群组刷屏。
+
+    Args:
+        message: 要删除的消息对象
+        delay: 延迟删除时间（秒），默认使用 AUTO_DELETE_SECONDS
+    """
+    try:
+        await asyncio.sleep(delay)
+        await message.delete()
+    except Exception as exc:
+        # 消息可能已被手动删除或 Bot 缺少删除权限
+        logging.debug(f"消息自动删除失败: {exc}")
+
+
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Telegram /add 命令，添加监控站点（自动从URL提取域名作为名称）。"""
     config = load_config()
@@ -482,16 +597,18 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 验证用户权限
     if not check_user_permission(chat_id, config):
-        await update.message.reply_text("❌ 无权限操作此 Bot")
+        reply = await update.message.reply_text("❌ 无权限操作此 Bot")
+        asyncio.create_task(auto_delete_message(reply))
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
     if len(context.args) < 1:
-        await update.message.reply_text(
+        reply = await update.message.reply_text(
             "📝 用法: /add <网址>\n"
             "💡 示例: /add https://www.example.com\n"
             "✨ 自动从URL提取域名作为站点名称"
         )
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     url = " ".join(context.args)
@@ -503,7 +620,8 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     config.setdefault("sites", []).append({"name": name, "url": url})
     save_config(config)
-    await update.message.reply_text(f"✅ 添加成功\n📌 {name} → {url}")
+    reply = await update.message.reply_text(f"✅ 添加成功\n📌 {name} → {url}")
+    asyncio.create_task(auto_delete_message(reply))
     logging.info(f"添加站点: {name} → {url}")
 
 
@@ -514,18 +632,20 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     # 验证用户权限
     if not check_user_permission(chat_id, config):
-        await update.message.reply_text("❌ 无权限操作此 Bot")
+        reply = await update.message.reply_text("❌ 无权限操作此 Bot")
+        asyncio.create_task(auto_delete_message(reply))
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
     if len(context.args) < 1:
-        await update.message.reply_text(
+        reply = await update.message.reply_text(
             "📝 用法: /delete <网址|域名|名称>\n"
             "💡 示例:\n"
             "  /delete https://www.example.com\n"
             "  /delete example.com\n"
             "  /delete example.com-2"
         )
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     url_or_domain = " ".join(context.args)
@@ -541,7 +661,8 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             new_sites.append(site)
 
     if not deleted_sites:
-        await update.message.reply_text(f"❌ 未找到匹配 '{url_or_domain}' 的站点")
+        reply = await update.message.reply_text(f"❌ 未找到匹配 '{url_or_domain}' 的站点")
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     config["sites"] = new_sites
@@ -549,11 +670,12 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     # 显示删除结果
     if len(deleted_sites) == 1:
-        await update.message.reply_text(f"🗑️ 删除成功\n📌 {deleted_sites[0]}")
+        reply = await update.message.reply_text(f"🗑️ 删除成功\n📌 {deleted_sites[0]}")
     else:
         msg = "🗑️ 删除成功\n\n" + "\n".join([f"• {s}" for s in deleted_sites])
-        await update.message.reply_text(msg)
+        reply = await update.message.reply_text(msg)
 
+    asyncio.create_task(auto_delete_message(reply))
     logging.info(f"删除站点: {', '.join(deleted_sites)}")
 
 
@@ -564,17 +686,20 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 验证用户权限
     if not check_user_permission(chat_id, config):
-        await update.message.reply_text("❌ 无权限操作此 Bot")
+        reply = await update.message.reply_text("❌ 无权限操作此 Bot")
+        asyncio.create_task(auto_delete_message(reply))
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
     sites = config.get("sites", [])
     if not sites:
-        await update.message.reply_text("📋 当前无监控站点")
+        reply = await update.message.reply_text("📋 当前无监控站点")
+        asyncio.create_task(auto_delete_message(reply))
         return
     # HTML 转义防止注入攻击
     lines = [f"• {html.escape(s.get('name', ''))} → {html.escape(s.get('url', ''))}" for s in sites]
-    await update.message.reply_text(f"📋 <b>当前监控列表</b>（共 {len(sites)} 个站点）\n\n" + "\n".join(lines), parse_mode="HTML")
+    reply = await update.message.reply_text(f"📋 <b>当前监控列表</b>（共 {len(sites)} 个站点）\n\n" + "\n".join(lines), parse_mode="HTML")
+    asyncio.create_task(auto_delete_message(reply))
 
 
 async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -597,7 +722,8 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # 验证用户权限
     if not check_user_permission(chat_id, config):
-        await update.message.reply_text("❌ 无权限操作此 Bot")
+        reply = await update.message.reply_text("❌ 无权限操作此 Bot")
+        asyncio.create_task(auto_delete_message(reply))
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
@@ -607,7 +733,7 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # 第一行是命令，后续是网址
     if len(lines) < 2:
-        await update.message.reply_text(
+        reply = await update.message.reply_text(
             "📝 用法:\n"
             "/addmany\n"
             "网址1\n"
@@ -618,17 +744,20 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "https://www.backup.com\n\n"
             "✨ 自动从URL提取域名作为站点名称"
         )
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     # 提取URL列表
     if lines[0].startswith("/addmany"):
         urls = lines[1:]
     else:
-        await update.message.reply_text("❌ 命令格式错误")
+        reply = await update.message.reply_text("❌ 命令格式错误")
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     if not urls:
-        await update.message.reply_text("❌ 至少需要提供一个网址")
+        reply = await update.message.reply_text("❌ 至少需要提供一个网址")
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     # 批量添加站点
@@ -653,7 +782,8 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # 发送成功消息
     success_msg = "✅ 批量添加成功！\n\n" + "\n".join(added_sites) + f"\n\n📊 共添加 {len(added_sites)} 个站点"
-    await update.message.reply_text(success_msg)
+    reply = await update.message.reply_text(success_msg)
+    asyncio.create_task(auto_delete_message(reply))
     logging.info(f"批量添加 {len(added_sites)} 个站点")
 
 
@@ -677,7 +807,8 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # 验证用户权限
     if not check_user_permission(chat_id, config):
-        await update.message.reply_text("❌ 无权限操作此 Bot")
+        reply = await update.message.reply_text("❌ 无权限操作此 Bot")
+        asyncio.create_task(auto_delete_message(reply))
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
@@ -687,7 +818,7 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # 第一行是命令，后续是要删除的URL或域名
     if len(lines) < 2:
-        await update.message.reply_text(
+        reply = await update.message.reply_text(
             "📝 用法:\n"
             "/deletemany\n"
             "网址或域名1\n"
@@ -698,17 +829,20 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "backup.com\n"
             "cdn.com-2"
         )
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     # 提取要删除的URL/域名列表
     if lines[0].startswith("/deletemany"):
         delete_list = lines[1:]
     else:
-        await update.message.reply_text("❌ 命令格式错误")
+        reply = await update.message.reply_text("❌ 命令格式错误")
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     if not delete_list:
-        await update.message.reply_text("❌ 至少需要提供一个网址或域名")
+        reply = await update.message.reply_text("❌ 至少需要提供一个网址或域名")
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     sites = config.get("sites", [])
@@ -729,7 +863,8 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             new_sites.append(site)
 
     if not deleted_sites:
-        await update.message.reply_text(f"❌ 未找到匹配的站点")
+        reply = await update.message.reply_text(f"❌ 未找到匹配的站点")
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     config["sites"] = new_sites
@@ -737,7 +872,8 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # 发送成功消息
     success_msg = "🗑️ 批量删除成功！\n\n" + "\n".join(deleted_sites) + f"\n\n📊 共删除 {len(deleted_sites)} 个站点"
-    await update.message.reply_text(success_msg)
+    reply = await update.message.reply_text(success_msg)
+    asyncio.create_task(auto_delete_message(reply))
     logging.info(f"批量删除 {len(deleted_sites)} 个站点")
 
 
@@ -748,13 +884,15 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 验证用户权限
     if not check_user_permission(chat_id, config):
-        await update.message.reply_text("❌ 无权限操作此 Bot")
+        reply = await update.message.reply_text("❌ 无权限操作此 Bot")
+        asyncio.create_task(auto_delete_message(reply))
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
     sites = config.get("sites", [])
     if not sites:
-        await update.message.reply_text("📋 当前无监控站点，请先使用 /add 添加站点")
+        reply = await update.message.reply_text("📋 当前无监控站点，请先使用 /add 添加站点")
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     # 发送进度提示
@@ -784,8 +922,8 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not url:
             continue
 
-        # 调用17CE API
-        api_result = call_17ce_api(url, config)
+        # 使用 asyncio.to_thread 避免阻塞事件循环
+        api_result = await asyncio.to_thread(call_17ce_api, url, config)
         fail_rate, regions, status = analyze_results_detailed(api_result)
 
         # 分类统计
@@ -850,7 +988,8 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     report_lines.append(f"\n📊 总计: {total_checked} 个站点")
 
-    await update.message.reply_text("\n".join(report_lines), parse_mode="HTML")
+    reply = await update.message.reply_text("\n".join(report_lines), parse_mode="HTML")
+    asyncio.create_task(auto_delete_message(reply))
     logging.info(f"执行 /check 命令，检测 {total_checked} 个站点")
 
 
@@ -861,15 +1000,17 @@ async def cmd_checkone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # 验证用户权限
     if not check_user_permission(chat_id, config):
-        await update.message.reply_text("❌ 无权限操作此 Bot")
+        reply = await update.message.reply_text("❌ 无权限操作此 Bot")
+        asyncio.create_task(auto_delete_message(reply))
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
     if len(context.args) < 1:
-        await update.message.reply_text(
+        reply = await update.message.reply_text(
             "📝 用法: /checkone <网址>\n"
             "💡 示例: /checkone www.example.com"
         )
+        asyncio.create_task(auto_delete_message(reply))
         return
 
     url = " ".join(context.args)
@@ -877,8 +1018,8 @@ async def cmd_checkone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # 发送进度提示
     progress_msg = await update.message.reply_text(f"🔍 正在检测 {url}...")
 
-    # 调用17CE API
-    api_result = call_17ce_api(url, config)
+    # 使用 asyncio.to_thread 避免阻塞事件循环
+    api_result = await asyncio.to_thread(call_17ce_api, url, config)
     fail_rate, regions, status = analyze_results_detailed(api_result)
 
     # 删除进度消息
@@ -905,7 +1046,8 @@ async def cmd_checkone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         report_lines.append("✅ 所有地区检测正常")
 
-    await update.message.reply_text("\n".join(report_lines), parse_mode="HTML")
+    reply = await update.message.reply_text("\n".join(report_lines), parse_mode="HTML")
+    asyncio.create_task(auto_delete_message(reply))
     logging.info(f"执行 /checkone 命令，检测 {url}")
 
 
@@ -916,7 +1058,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 验证用户权限
     if not check_user_permission(chat_id, config):
-        await update.message.reply_text("❌ 无权限操作此 Bot")
+        reply = await update.message.reply_text("❌ 无权限操作此 Bot")
+        asyncio.create_task(auto_delete_message(reply))
         logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
 
@@ -983,11 +1126,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• 全国失败率 > 20%\n"
         "• 任意单地区失败节点 ≥ 3 个\n\n"
 
-        "🔍 <b>检测频率</b>：每 15 分钟\n"
-        "📊 <b>监控节点</b>：全国 200+ 节点（电信/联通/移动）"
+        "🔍 <b>检测频率</b>：\n"
+        "• 工作日: 9:00-11:00, 13:00-17:00 每小时检测\n"
+        "• 周末: 每天10:00检测一次\n\n"
+
+        "📊 <b>监控节点</b>：全国33个主要城市，66个节点（IDC+路由器，覆盖电信/联通/移动）"
     )
 
-    await update.message.reply_text(help_text, parse_mode="HTML")
+    reply = await update.message.reply_text(help_text, parse_mode="HTML")
+    asyncio.create_task(auto_delete_message(reply))
 
 
 async def setup_bot_commands(app: Application) -> None:
@@ -1034,14 +1181,50 @@ def start_bot(config: Dict[str, Any]) -> Optional[Application]:
 
 
 def run_scheduler() -> None:
-    """在子线程中运行定时任务调度器。"""
+    """在子线程中运行定时任务调度器。
+
+    检测策略:
+    - 工作日(周一至周五): 早上9-11点每小时一次，下午13-17点每小时一次
+    - 周末(周六、周日): 每天10:00检测一次
+    """
     logging.info("定时监控任务已启动")
-    schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(monitor_all)
-    monitor_all()  # 立即执行一次
+
+    # 工作日检测时间点
+    weekday_times = [
+        "09:00", "10:00", "11:00",  # 早上9-11点
+        "13:00", "14:00", "15:00", "16:00", "17:00"  # 下午13-17点
+    ]
+
+    # 配置工作日检测任务 (周一到周五)
+    for check_time in weekday_times:
+        schedule.every().monday.at(check_time).do(monitor_all)
+        schedule.every().tuesday.at(check_time).do(monitor_all)
+        schedule.every().wednesday.at(check_time).do(monitor_all)
+        schedule.every().thursday.at(check_time).do(monitor_all)
+        schedule.every().friday.at(check_time).do(monitor_all)
+
+    # 配置周末检测任务 (周六、周日各一次)
+    schedule.every().saturday.at("10:00").do(monitor_all)
+    schedule.every().sunday.at("10:00").do(monitor_all)
+
+    logging.info("✅ 定时任务配置完成:")
+    logging.info("   📅 工作日: 9:00-11:00, 13:00-17:00 每小时检测")
+    logging.info("   📅 周末: 每天10:00检测一次")
+
+    # 立即执行一次，捕获异常避免调度停止
+    try:
+        monitor_all()
+    except Exception as exc:
+        logging.error("首次监控执行失败: %s", exc, exc_info=True)
 
     while True:
-        schedule.run_pending()
-        time.sleep(1)
+        try:
+            schedule.run_pending()
+            time.sleep(1)
+        except Exception as exc:
+            # 捕获异常但继续运行，避免调度停止
+            logging.error("定时任务执行异常: %s", exc, exc_info=True)
+            time.sleep(1)
 
 
 def main() -> None:

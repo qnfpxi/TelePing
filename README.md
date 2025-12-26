@@ -4,14 +4,15 @@
 
 ## 📋 项目特点
 
-- **单文件实现**：所有代码在 `monitor.py` 中，总代码量约 293 行
+- **模块化设计**：核心监控逻辑在 `monitor.py`，城市节点配置在 `city_nodes_config.py`
 - **零数据库**：使用 `config.json` 管理站点配置
-- **分布式监控**：调用 17CE API，利用全国 200+ 节点检测
-- **智能告警**：仅当失败率 > 20% 时发送 Telegram 告警
-- **地区显示**：告警消息显示异常地区分布
+- **分布式监控**：调用 17CE API，覆盖全国 33 个主要城市，66 个节点（IDC+路由器）
+- **智能告警**：满足任一条件触发告警：全国失败率 > 20% 或 单地区失败节点 ≥ 3
+- **地区显示**：告警消息显示异常类型、地区分布和受影响运营商
 - **自助管理**：通过 Telegram Bot 命令管理监控站点
 - **🔒 安全防护**：Chat ID 白名单，防止 Bot 被滥用
 - **👥 群组支持**：支持个人和群组操作模式
+- **⏰ 差异化检测**：工作日密集监控（9-11时、13-17时），周末轻量化（仅10:00）
 
 ## 🚀 快速开始
 
@@ -47,7 +48,8 @@ pip install -r requirements.txt
   "telegram_bot_token": "YOUR_BOT_TOKEN_HERE",
   "telegram_chat_id": "YOUR_CHAT_ID_HERE",
   "17ce_username": "YOUR_17CE_USERNAME",
-  "17ce_token": "YOUR_17CE_TOKEN"
+  "17ce_token": "YOUR_17CE_TOKEN",
+  "allowed_chat_ids": ["YOUR_CHAT_ID_HERE"]
 }
 ```
 
@@ -75,25 +77,37 @@ nohup python3 monitor.py > output.log 2>&1 &
 
 ## 📱 Telegram Bot 命令
 
-- `/add <名称> <网址>` - 添加监控站点
-  - 示例：`/add 官网 www.example.com`
-- `/addmany <站点名>,<网址1>,<网址2>,...` - 批量添加监控站点（自动编号）
-  - 示例：`/addmany 官网,www.example.com,backup.example.com,cdn.example.com`
-  - 结果：自动创建 `官网-1`, `官网-2`, `官网-3` 三个站点
-- `/delete <名称>` - 删除监控站点
-  - 示例：`/delete 官网`
+- `/help` - 显示所有命令和使用说明
+- `/add <网址>` - 添加监控站点（自动从URL提取域名作为站点名称）
+  - 示例：`/add https://www.example.com` → 自动创建名为 `example.com` 的站点
+  - 重名处理：自动编号为 `example.com-2`、`example.com-3`
+- `/addmany` - 批量添加监控站点（多行格式）
+  ```
+  /addmany
+  https://www.example.com
+  https://www.backup.com
+  https://www.cdn.com
+  ```
+  结果：自动创建 `example.com`、`backup.com`、`cdn.com` 三个站点
+- `/delete <网址|域名|名称>` - 删除监控站点（支持智能匹配）
+  - 示例：`/delete example.com` 或 `/delete https://www.example.com`
+- `/deletemany` - 批量删除监控站点（多行格式）
 - `/list` - 查看当前监控列表
+- `/check` - 立即检测所有站点并返回详细报告
+- `/checkone <网址>` - 检测单个站点的详细状态
 
 ## 📁 项目结构
 
 ```
 TelePing/
-├── monitor.py                  # 主程序（所有功能）
-├── config.json                 # 配置文件
+├── monitor.py                  # 主程序（监控逻辑、Bot 命令处理）
+├── city_nodes_config.py        # 城市节点配置（33个主要城市）
+├── config.json                 # 配置文件（凭证和站点列表）
 ├── requirements.txt            # Python 依赖
 ├── Dockerfile                  # Docker 镜像构建文件
 ├── docker-compose.yml          # Docker Compose 配置
 ├── .dockerignore               # Docker 构建忽略文件
+├── .gitignore                  # Git 忽略文件
 ├── monitor.log                 # 日志文件（自动生成）
 ├── DEPLOY.md                   # 详细部署指南
 ├── GROUP_SETUP.md              # 群组配置指南
@@ -128,13 +142,32 @@ TelePing/
 
 ## 🔧 高级配置
 
+### 检测频率
+
+项目使用差异化检测策略（在 `monitor.py` 的 `run_scheduler()` 函数中配置）：
+
+- **工作日**（周一至周五）：早上 9:00-11:00 和下午 13:00-17:00，每小时检测一次
+- **周末**（周六、周日）：每天 10:00 检测一次
+
+如需调整检测时间，请修改 `run_scheduler()` 函数中的 `weekday_times` 列表和周末时间配置。
+
+### API 调用参数
+
 修改 `monitor.py` 中的常量：
 
 ```python
-CHECK_INTERVAL_MINUTES = 15     # 检测间隔（分钟）
 RETRY_TIMES = 3                 # API 调用重试次数
 SLEEP_BETWEEN_RETRY = 5         # 重试间隔（秒）
+AUTO_DELETE_SECONDS = 60        # Bot消息自动删除时间（秒）
 ```
+
+### 节点配置
+
+修改 `city_nodes_config.py` 中的配置：
+
+- `MAJOR_CITIES`：城市列表（默认 33 个主要城市）
+- `num`：节点数量（默认 10，可根据账户配额调整）
+- `nodetype`、`isps`、`areas`：节点类型、运营商、地区过滤
 
 ## 📝 日志
 
@@ -157,13 +190,16 @@ tail -f monitor.log
 A: 调高 `config.json` 中的 `alert_threshold` 值（如改为 0.30）
 
 **Q: 想增加检测频率？**
-A: 修改 `monitor.py` 中的 `CHECK_INTERVAL_MINUTES` 常量
+A: 修改 `monitor.py` 中的 `run_scheduler()` 函数，添加更多检测时间点
 
 **Q: 17CE API 调用失败？**
 A: 检查网络连接、凭证配置，查看 `monitor.log` 获取详细错误
 
 **Q: Telegram 收不到消息？**
 A: 确认 `chat_id` 正确，确保服务器能访问 Telegram API
+
+**Q: Bot 命令无响应？**
+A: 检查 `allowed_chat_ids` 配置，确保你的 Chat ID 在白名单中
 
 ## 📄 设计原则
 
