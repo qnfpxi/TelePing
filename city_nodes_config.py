@@ -60,16 +60,32 @@ def get_city_ids():
     """获取城市ID列表"""
     return [city["city_id"] for city in MAJOR_CITIES]
 
-def get_node_config():
-    """生成17CE API节点配置（返回整数数组，符合官方API格式）
+def get_pro_ids():
+    """获取省份ID列表（去重）"""
+    return list(set([city["pro_id"] for city in MAJOR_CITIES]))
 
-    使用城市级配置而非省份级配置，更精准且节约积分：
-    - 33个主要城市 × 2节点/城市 = 66个节点/次
+def get_node_config():
+    """生成17CE API节点配置（返回数组格式，符合官方API要求）
+
+    使用城市级配置 + 省份范围，更精准且节约积分：
+    - 29个省份作为范围
+    - 33个主要城市精确筛选
+    - 每城2个节点 = 预计返回约33-66个节点/次（取决于节点可用性）
+
+    参数说明：
+    - pro_ids: 省份ID数组（必需，定义省份范围）
+    - city_ids: 城市ID数组（在省份范围内进一步筛选）
+    - num: 每个城市分配节点数
+    - nodetype: [1, 2] 表示 IDC + 路由器
+    - isps: [1, 2, 7] 表示 电信 + 联通 + 移动
+    - areas: [1] 表示中国大陆
     """
     city_ids = get_city_ids()  # 返回整数数组
+    pro_ids = get_pro_ids()    # 返回整数数组
 
     return {
-        "city_ids": city_ids,    # 城市ID列表（33个主要城市）
+        "pro_ids": pro_ids,      # 省份ID列表（29个省份，定义范围）
+        "city_ids": city_ids,    # 城市ID列表（33个主要城市，精确筛选）
         "num": 2,  # 每个城市分配2个节点
         "nodetype": [1, 2],  # 1=IDC, 2=路由器
         "isps": [1, 2, 7],   # 1=电信, 2=联通, 7=移动
