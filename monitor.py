@@ -185,7 +185,7 @@ def call_17ce_api(url: str, config: Dict[str, Any], retries: int = RETRY_TIMES) 
             test_msg = json.dumps({
                 "txnid": txnid,
                 "nodetype": node_config["nodetype"],  # [1, 2] IDC + 路由器
-                "num": node_config["num"],            # 城市数 × 2 (每城IDC+路由器各1)
+                "num": node_config["num"],            # 每个城市分配的节点数
                 "TestType": "HTTP",
                 "Url": normalized_url,
                 "TimeOut": 20,
@@ -194,9 +194,9 @@ def call_17ce_api(url: str, config: Dict[str, Any], retries: int = RETRY_TIMES) 
                 "type": 1,
                 "isps": node_config["isps"],          # [1, 2, 7] 电信、联通、移动
                 "areas": node_config["areas"],        # [1] 大陆地区
-                "pro_ids": node_config["pro_ids"]     # 省份ID列表（city_ids 不在官方示例中，已移除）
+                "city_ids": node_config["city_ids"]   # 城市ID列表（33个主要城市）
             })
-            logging.info(f"17CE 测速请求JSON（覆盖{len(MAJOR_CITIES)}个主要城市，{node_config['num']}个节点）: {test_msg}")
+            logging.info(f"17CE 测速请求JSON（覆盖{len(MAJOR_CITIES)}个主要城市，每城{node_config['num']}个节点）: {test_msg}")
             ws.send(test_msg)
             logging.info(f"17CE 已发送测速请求: {normalized_url} (txnid={txnid})")
 

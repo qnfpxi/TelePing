@@ -61,12 +61,16 @@ def get_city_ids():
     return [city["city_id"] for city in MAJOR_CITIES]
 
 def get_node_config():
-    """生成17CE API节点配置（返回整数数组，符合官方API格式）"""
-    pro_ids = get_province_ids()  # 返回整数数组
+    """生成17CE API节点配置（返回整数数组，符合官方API格式）
+
+    使用城市级配置而非省份级配置，更精准且节约积分：
+    - 33个主要城市 × 2节点/城市 = 66个节点/次
+    """
+    city_ids = get_city_ids()  # 返回整数数组
 
     return {
-        "pro_ids": pro_ids,      # 整数数组格式
-        "num": 1,  # ⚠️ 关键：每个省份分配的节点数（不是总节点数！）。设置为1可节约积分
+        "city_ids": city_ids,    # 城市ID列表（33个主要城市）
+        "num": 2,  # 每个城市分配2个节点
         "nodetype": [1, 2],  # 1=IDC, 2=路由器
         "isps": [1, 2, 7],   # 1=电信, 2=联通, 7=移动
         "areas": [1]         # 1=大陆
