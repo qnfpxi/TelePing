@@ -4,44 +4,37 @@
 
 ## 📋 项目特点
 
-- **单文件实现**：所有代码在 `monitor.py` 中，总代码量约 400 行
+- **单文件实现**：所有代码在 `monitor.py` 中，总代码量约 293 行
 - **零数据库**：使用 `config.json` 管理站点配置
 - **分布式监控**：调用 17CE API，利用全国 200+ 节点检测
-- **智能告警**：全国失败率 > 20% 或单地区失败节点 ≥ 3 时告警
-- **地区显示**：按异常类型显示受影响地区分布
+- **智能告警**：仅当失败率 > 20% 时发送 Telegram 告警
+- **地区显示**：告警消息显示异常地区分布
 - **自助管理**：通过 Telegram Bot 命令管理监控站点
 - **🔒 安全防护**：Chat ID 白名单，防止 Bot 被滥用
 - **👥 群组支持**：支持个人和群组操作模式
-- **🐳 Docker 支持**：一键部署，自动重启，日志轮转
 
 ## 🚀 快速开始
 
 ### 1. 准备工作
 
 **注册 17CE 账号**
+
 1. 访问 https://www.17ce.com/ 注册登录
 2. 进入"API 接口"页面，获取 `username` 和 `token`
 
 **创建 Telegram Bot**
+
 1. Telegram 搜索 @BotFather，输入 `/newbot` 创建机器人
 2. 获取 `BOT_TOKEN`
 3. 和你的 Bot 聊天一次，访问 `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` 获取 `CHAT_ID`
 
-### 2. 克隆项目
-
-```bash
-# 克隆项目到本地
-git clone https://github.com/qnfpxi/TelePing.git
-cd TelePing
-```
-
-### 3. 安装依赖
+### 2. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. 配置
+### 3. 配置
 
 编辑 `config.json`，填入你的凭证：
 
@@ -58,15 +51,11 @@ pip install -r requirements.txt
 }
 ```
 
-### 5. 运行
+### 4. 运行
 
 #### 方式一：Docker 部署（⭐ 推荐）
 
 ```bash
-# 配置文件（首次部署）
-cp config.json.example config.json
-vim config.json  # 填入你的凭证
-
 # 一键启动
 docker-compose up -d
 
@@ -86,18 +75,14 @@ nohup python3 monitor.py > output.log 2>&1 &
 
 ## 📱 Telegram Bot 命令
 
-- **➕ /add** `<名称> <网址>` - 添加监控站点
+- `/add <名称> <网址>` - 添加监控站点
   - 示例：`/add 官网 www.example.com`
-- **➕ /addmany** `<站点名>,<网址1>,<网址2>,...` - 批量添加监控站点（自动编号）
+- `/addmany <站点名>,<网址1>,<网址2>,...` - 批量添加监控站点（自动编号）
   - 示例：`/addmany 官网,www.example.com,backup.example.com,cdn.example.com`
   - 结果：自动创建 `官网-1`, `官网-2`, `官网-3` 三个站点
-- **➖ /delete** `<名称>` - 删除监控站点
+- `/delete <名称>` - 删除监控站点
   - 示例：`/delete 官网`
-- **➖ /deletemany** `<站点名前缀>` - 批量删除监控站点（删除所有自动编号的站点）
-  - 示例：`/deletemany 官网`
-  - 结果：删除所有 `官网-1`, `官网-2`, `官网-3` 等站点
-- **📋 /list** - 查看当前监控列表
-- **❓ /help** - 显示帮助信息和所有可用命令
+- `/list` - 查看当前监控列表
 
 ## 📁 项目结构
 
@@ -118,33 +103,24 @@ TelePing/
 ## ⚙️ 配置说明
 
 - `sites`: 监控站点列表
-- `alert_threshold`: 全国告警阈值（默认 0.20，即 20% 节点失败）
+- `alert_threshold`: 告警阈值（默认 0.20，即 20% 节点失败）
 - `telegram_bot_token`: Telegram Bot Token
 - `telegram_chat_id`: 接收告警的 Chat ID
 - `17ce_username`: 17CE 账号用户名
 - `17ce_token`: 17CE API Token
 - `allowed_chat_ids`: **🔒 安全白名单**，允许操作 Bot 的用户/群组 ID
 
-### 🚨 智能告警策略
-
-告警触发条件（满足任一即可）：
-1. **全国告警**：失败率 > `alert_threshold`（默认 20%）
-2. **区域告警**：任意单个地区失败节点 ≥ 3 个
-
-**举例说明**：
-- 场景 1：全国 200 个节点，50 个失败 → **触发全国告警**（25% > 20%）
-- 场景 2：北京 5 个节点，3 个失败 → **触发区域告警**（北京失败 3 个）
-- 场景 3：全国 200 个节点，仅 2 个失败 → 不告警（未达到任何条件）
-
 ## 📚 详细文档
 
 - **[DEPLOY.md](DEPLOY.md)** - 完整的部署指南（推荐阅读）
+  
   - 详细的凭证获取步骤
   - 多种部署方式（nohup、screen、systemd）
   - 配置说明和使用场景
   - 常见问题解答
 
 - **[GROUP_SETUP.md](GROUP_SETUP.md)** - 群组配置指南
+  
   - 如何添加 Bot 到群组
   - 获取群组 Chat ID
   - 群组权限配置
@@ -163,12 +139,14 @@ SLEEP_BETWEEN_RETRY = 5         # 重试间隔（秒）
 ## 📝 日志
 
 所有运行日志记录在 `monitor.log` 文件中，包括：
+
 - 检测开始/结束时间
 - API 调用成功/失败
 - 告警发送状态
 - 错误信息
 
 查看日志：
+
 ```bash
 tail -f monitor.log
 ```
@@ -190,6 +168,7 @@ A: 确认 `chat_id` 正确，确保服务器能访问 Telegram API
 ## 📄 设计原则
 
 本项目遵循"**能跑 > 好看 > 优雅 > 完美**"的原则：
+
 - 不使用数据库、消息队列、Web 框架
 - 代码简单直接，易于理解和修改
 - 快速上线，满足基本监控需求

@@ -561,12 +561,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text, parse_mode="HTML")
 
 
-def start_bot(config: Dict[str, Any]) -> None:
-    """启动 Telegram Bot 的轮询线程。"""
+def start_bot(config: Dict[str, Any]) -> Optional[Application]:
+    """构建并返回 Telegram Bot Application 对象，由主线程运行。"""
     token = config.get("telegram_bot_token")
     if not token:
         logging.error("未配置 Telegram Bot Token，Bot 不会启动")
-        return
+        return None
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("help", cmd_help))
@@ -576,24 +576,42 @@ def start_bot(config: Dict[str, Any]) -> None:
     app.add_handler(CommandHandler("addmany", cmd_addmany))
     app.add_handler(CommandHandler("deletemany", cmd_deletemany))
 
-    bot_thread = threading.Thread(target=app.run_polling, daemon=True)
-    bot_thread.start()
-    logging.info("Telegram Bot 已启动")
+    logging.info("Telegram Bot 已配置，准备在主线程运行")
+    return app
 
 
-def main() -> None:
-    """程序入口：初始化日志、启动 Bot、注册定时任务并循环。"""
-    setup_logging()
-    logging.info("监控系统启动")
-    config = load_config()
-
-    start_bot(config)
+def run_scheduler() -> None:
+    """在子线程中运行定时任务调度器。"""
+    logging.info("定时监控任务已启动")
     schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(monitor_all)
-    monitor_all()
+    monitor_all()  # 立即执行一次
 
     while True:
         schedule.run_pending()
         time.sleep(1)
+
+
+def main() -> None:
+    """程序入口：初始化日志、启动定时任务（子线程）、运行 Bot（主线程）。"""
+    setup_logging()
+    logging.info("监控系统启动")
+    config = load_config()
+
+    # 启动定时监控任务（子线程）
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+
+    # 构建 Bot 应用
+    app = start_bot(config)
+    if app:
+        # 在主线程运行 Bot（避免 set_wakeup_fd 错误）
+        logging.info("Telegram Bot 开始运行于主线程")
+        app.run_polling()
+    else:
+        # 如果 Bot 未配置，则主线程保持运行
+        logging.warning("Bot 未启动，仅运行定时监控")
+        while True:
+            time.sleep(60)
 
 
 if __name__ == "__main__":
