@@ -133,12 +133,21 @@ def setup_logging() -> None:
 def load_config() -> Dict[str, Any]:
     """读取配置文件，失败时返回默认结构以保证流程继续运行。"""
     with _config_lock:
+        config: Dict[str, Any]
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                config = json.load(f)
         except Exception as exc:
             logging.error("加载配置失败，将使用默认配置: %s", exc)
-            return {"sites": [], "alert_threshold": DEFAULT_THRESHOLD}
+            config = {"sites": [], "alert_threshold": DEFAULT_THRESHOLD}
+
+        # 校验必填字段缺失时兜底为空字符串，避免后续功能报错
+        required_keys = ["17ce_username", "17ce_token", "telegram_bot_token", "telegram_chat_id"]
+        for key in required_keys:
+            if key not in config:
+                logging.error("配置缺少必填字段 %s，已使用默认值", key)
+                config[key] = ""
+        return config
 
 
 def save_config(config: Dict[str, Any]) -> None:
@@ -378,7 +387,7 @@ def analyze_results(results: Optional[Dict[str, Any]], threshold: float) -> Tupl
     if valid_total == 0:
         # 所有节点都被跳过，无法计算失败率
         logging.error("所有节点数据异常，无法计算失败率")
-        return None, None, None, 0.0
+        return None, None, None, -1.0
 
     fail_rate = failed / valid_total
 
@@ -409,11 +418,11 @@ def analyze_results_detailed(results: Optional[Dict[str, Any]]) -> Tuple[float, 
     返回: (失败率, 地区分布字典, 状态描述)
     """
     if not results or "data" not in results:
-        return 0.0, {}, "❌ API调用失败"
+        return -1.0, {}, "❌ API调用失败"
 
     data = results.get("data", [])
     if not isinstance(data, list) or len(data) == 0:
-        return 0.0, {}, "❌ 无检测数据"
+        return -1.0, {}, "❌ 无检测数据"
 
     total = len(data)
     failed = 0
@@ -581,6 +590,10 @@ def monitor_all() -> None:
 def check_user_permission(chat_id: int, config: Dict[str, Any]) -> bool:
     """验证用户是否有权限操作 Bot。"""
     allowed_ids = config.get("allowed_chat_ids", [])
+    if not isinstance(allowed_ids, list):
+        logging.error("配置中的 allowed_chat_ids 不是列表类型，已重置为空列表")
+        allowed_ids = []
+        config["allowed_chat_ids"] = allowed_ids
     # 支持字符串和整数格式的 Chat ID
     return str(chat_id) in [str(id) for id in allowed_ids]
 
@@ -626,6 +639,10 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     domain = extract_domain_from_url(url)
     # 生成唯一名称（如果重复则自动编号）
     sites = config.get("sites", [])
+    if not isinstance(sites, list):
+        logging.error("配置中的 sites 不是列表类型，已重置为空列表")
+        sites = []
+    config["sites"] = sites
     name = generate_unique_name(domain, sites)
 
     config.setdefault("sites", []).append({"name": name, "url": url})
@@ -772,6 +789,10 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # 批量添加站点
     sites = config.get("sites", [])
+    if not isinstance(sites, list):
+        logging.error("配置中的 sites 不是列表类型，已重置为空列表")
+        sites = []
+    config["sites"] = sites
     added_sites = []
 
     for url in urls:
@@ -856,6 +877,10 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     sites = config.get("sites", [])
+    if not isinstance(sites, list):
+        logging.error("配置中的 sites 不是列表类型，已重置为空列表")
+        sites = []
+    config["sites"] = sites
     deleted_sites = []
     new_sites = []
 
@@ -915,6 +940,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     normal_count = 0
     warning_count = 0
     error_count = 0
+    api_failure_count = 0
     start_time = time.time()
 
     for idx, site in enumerate(sites, 1):
@@ -935,9 +961,12 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # 使用 asyncio.to_thread 避免阻塞事件循环
         api_result = await asyncio.to_thread(call_17ce_api, url, config)
         fail_rate, regions, status = analyze_results_detailed(api_result)
+        api_failed = fail_rate < 0
 
         # 分类统计
-        if fail_rate >= 0.20:
+        if api_failed:
+            api_failure_count += 1
+        elif fail_rate >= 0.20:
             error_count += 1
         elif fail_rate >= 0.10:
             warning_count += 1
@@ -955,7 +984,8 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "url": url,
             "fail_rate": fail_rate,
             "status": status,
-            "region_text": region_text
+            "region_text": region_text,
+            "api_failed": api_failed
         })
 
     # 删除进度消息
@@ -975,23 +1005,25 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if total_checked <= 6:
         # 显示所有站点详情
         for r in results:
+            fail_rate_text = "API失败" if r["api_failed"] else f"{r['fail_rate']:.1%}"
             report_lines.append(
                 f"{r['status']} <b>{html.escape(r['name'])}</b> ({html.escape(r['url'])})\n"
-                f"   失败率: {r['fail_rate']:.1%}{r['region_text']}\n"
+                f"   失败率: {fail_rate_text}{r['region_text']}\n"
             )
     else:
         # 只显示异常和警告站点
         report_lines.append(f"📊 <b>概览</b>")
-        report_lines.append(f"✅ 正常: {normal_count} | ⚠️ 警告: {warning_count} | ❌ 异常: {error_count}\n")
+        report_lines.append(f"✅ 正常: {normal_count} | ⚠️ 警告: {warning_count} | ❌ 异常: {error_count} | 🚫 API失败: {api_failure_count}\n")
 
         # 显示异常和警告站点
-        abnormal_results = [r for r in results if r['fail_rate'] >= 0.10]
+        abnormal_results = [r for r in results if r['fail_rate'] >= 0.10 or r["api_failed"]]
         if abnormal_results:
             report_lines.append(f"<b>⚠️ 需要关注的站点：</b>\n")
             for r in abnormal_results:
+                fail_rate_text = "API失败" if r["api_failed"] else f"{r['fail_rate']:.1%}"
                 report_lines.append(
                     f"{r['status']} <b>{html.escape(r['name'])}</b> ({html.escape(r['url'])})\n"
-                    f"   失败率: {r['fail_rate']:.1%}{r['region_text']}\n"
+                    f"   失败率: {fail_rate_text}{r['region_text']}\n"
                 )
         else:
             report_lines.append("✅ 所有站点运行正常")
@@ -1031,6 +1063,7 @@ async def cmd_checkone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # 使用 asyncio.to_thread 避免阻塞事件循环
     api_result = await asyncio.to_thread(call_17ce_api, url, config)
     fail_rate, regions, status = analyze_results_detailed(api_result)
+    api_failed = fail_rate < 0
 
     # 删除进度消息
     try:
@@ -1043,12 +1076,14 @@ async def cmd_checkone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"🔍 <b>单站点检测报告</b>",
         f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
         f"🌐 网址: {html.escape(url)}",
-        f"📊 失败率: {fail_rate:.2%}",
+        f"📊 失败率: {'API失败' if api_failed else f'{fail_rate:.2%}'}",
         f"🏷️ 状态: {status}\n"
     ]
 
     # 添加地区详情
-    if regions:
+    if api_failed:
+        report_lines.append("🚫 API调用失败，未获取到地区数据")
+    elif regions:
         sorted_regions = sorted(regions.items(), key=lambda x: x[1], reverse=True)[:10]
         report_lines.append("<b>受影响地区：</b>")
         for region, count in sorted_regions:
