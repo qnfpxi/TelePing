@@ -3,6 +3,7 @@ import hashlib
 import html
 import json
 import logging
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -22,6 +23,78 @@ CHECK_INTERVAL_MINUTES = 15
 
 # 配置文件读写锁，防止并发操作导致数据损坏
 _config_lock = threading.Lock()
+
+
+def extract_domain_from_url(url: str) -> str:
+    """从URL中提取域名作为站点名称。
+
+    示例:
+        https://www.example.com → example.com
+        https://www.example.com/path → example.com
+        www.example.com → example.com
+        example.com → example.com
+    """
+    # 移除协议前缀
+    url = re.sub(r'^https?://', '', url)
+    # 移除路径和参数
+    url = url.split('/')[0].split('?')[0].split('#')[0]
+    # 移除端口
+    url = url.split(':')[0]
+    # 移除 www. 前缀
+    url = re.sub(r'^www\.', '', url)
+    return url.strip()
+
+
+def generate_unique_name(base_name: str, existing_sites: List[Dict[str, Any]]) -> str:
+    """生成唯一的站点名称，如果重名则添加编号。
+
+    Args:
+        base_name: 基础名称（通常是域名）
+        existing_sites: 已存在的站点列表
+
+    Returns:
+        唯一的站点名称
+    """
+    existing_names = {site.get("name", "") for site in existing_sites}
+
+    # 如果名称不存在，直接返回
+    if base_name not in existing_names:
+        return base_name
+
+    # 否则添加编号
+    counter = 2
+    while f"{base_name}-{counter}" in existing_names:
+        counter += 1
+    return f"{base_name}-{counter}"
+
+
+def match_site_by_url(url_or_domain: str, site: Dict[str, Any]) -> bool:
+    """判断站点是否匹配给定的URL或域名。
+
+    支持匹配：
+    - 完整URL: https://www.example.com
+    - 带www域名: www.example.com
+    - 纯域名: example.com
+    - 站点名称: example.com 或 example.com-2
+    """
+    site_url = site.get("url", "")
+    site_name = site.get("name", "")
+
+    # 提取输入的域名
+    input_domain = extract_domain_from_url(url_or_domain)
+    # 提取站点URL的域名
+    site_domain = extract_domain_from_url(site_url)
+
+    # 匹配条件：
+    # 1. 域名匹配
+    # 2. URL完全匹配
+    # 3. 名称匹配（支持 example.com 和 example.com-2）
+    return (
+        input_domain == site_domain or
+        url_or_domain == site_url or
+        url_or_domain == site_name or
+        site_name.startswith(f"{input_domain}-")
+    )
 
 
 def setup_logging() -> None:
@@ -403,28 +476,7 @@ def check_user_permission(chat_id: int, config: Dict[str, Any]) -> bool:
 
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Telegram /add 命令，添加监控站点并持久化到 config.json。"""
-    config = load_config()
-    chat_id = update.effective_chat.id
-
-    # 验证用户权限
-    if not check_user_permission(chat_id, config):
-        await update.message.reply_text("❌ 无权限操作此 Bot")
-        logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
-        return
-
-    if len(context.args) < 2:
-        await update.message.reply_text("📝 用法: /add <名称> <网址>\n💡 示例: /add 官网 www.example.com")
-        return
-    name = context.args[0]
-    url = " ".join(context.args[1:])
-    config.setdefault("sites", []).append({"name": name, "url": url})
-    save_config(config)
-    await update.message.reply_text(f"✅ 添加成功\n📌 {name} → {url}")
-
-
-async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Telegram /delete 命令，删除监控站点。"""
+    """Telegram /add 命令，添加监控站点（自动从URL提取域名作为名称）。"""
     config = load_config()
     chat_id = update.effective_chat.id
 
@@ -435,17 +487,74 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if len(context.args) < 1:
-        await update.message.reply_text("📝 用法: /delete <名称>\n💡 示例: /delete 官网")
+        await update.message.reply_text(
+            "📝 用法: /add <网址>\n"
+            "💡 示例: /add https://www.example.com\n"
+            "✨ 自动从URL提取域名作为站点名称"
+        )
         return
-    name = context.args[0]
+
+    url = " ".join(context.args)
+    # 从URL提取域名作为名称
+    domain = extract_domain_from_url(url)
+    # 生成唯一名称（如果重复则自动编号）
     sites = config.get("sites", [])
-    new_sites = [s for s in sites if s.get("name") != name]
-    if len(new_sites) == len(sites):
-        await update.message.reply_text(f"❌ 未找到名称为 '{name}' 的站点")
+    name = generate_unique_name(domain, sites)
+
+    config.setdefault("sites", []).append({"name": name, "url": url})
+    save_config(config)
+    await update.message.reply_text(f"✅ 添加成功\n📌 {name} → {url}")
+    logging.info(f"添加站点: {name} → {url}")
+
+
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telegram /delete 命令，删除监控站点（支持URL、域名或名称匹配）。"""
+    config = load_config()
+    chat_id = update.effective_chat.id
+
+    # 验证用户权限
+    if not check_user_permission(chat_id, config):
+        await update.message.reply_text("❌ 无权限操作此 Bot")
+        logging.warning(f"未授权用户尝试操作 Bot: {chat_id}")
         return
+
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "📝 用法: /delete <网址|域名|名称>\n"
+            "💡 示例:\n"
+            "  /delete https://www.example.com\n"
+            "  /delete example.com\n"
+            "  /delete example.com-2"
+        )
+        return
+
+    url_or_domain = " ".join(context.args)
+    sites = config.get("sites", [])
+
+    # 查找匹配的站点
+    deleted_sites = []
+    new_sites = []
+    for site in sites:
+        if match_site_by_url(url_or_domain, site):
+            deleted_sites.append(f"{site.get('name', '')} → {site.get('url', '')}")
+        else:
+            new_sites.append(site)
+
+    if not deleted_sites:
+        await update.message.reply_text(f"❌ 未找到匹配 '{url_or_domain}' 的站点")
+        return
+
     config["sites"] = new_sites
     save_config(config)
-    await update.message.reply_text(f"🗑️ 删除成功\n📌 {name}")
+
+    # 显示删除结果
+    if len(deleted_sites) == 1:
+        await update.message.reply_text(f"🗑️ 删除成功\n📌 {deleted_sites[0]}")
+    else:
+        msg = "🗑️ 删除成功\n\n" + "\n".join([f"• {s}" for s in deleted_sites])
+        await update.message.reply_text(msg)
+
+    logging.info(f"删除站点: {', '.join(deleted_sites)}")
 
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -469,19 +578,19 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Telegram /addmany 命令，批量添加监控站点。
+    """Telegram /addmany 命令，批量添加监控站点（自动从URL提取域名）。
 
     用法:
-    /addmany 站点名
+    /addmany
     网址1
     网址2
     网址3
 
     示例:
-    /addmany 官网
-    www.example.com
-    backup.example.com
-    cdn.example.com
+    /addmany
+    https://www.example.com
+    https://www.backup.com
+    https://www.cdn.com
     """
     config = load_config()
     chat_id = update.effective_chat.id
@@ -496,35 +605,24 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     message_text = update.message.text.strip()
     lines = [line.strip() for line in message_text.split("\n") if line.strip()]
 
-    # 第一行是命令，第二行是站点名，后续是网址
-    if len(lines) < 3:
+    # 第一行是命令，后续是网址
+    if len(lines) < 2:
         await update.message.reply_text(
             "📝 用法:\n"
-            "/addmany 站点名\n"
+            "/addmany\n"
             "网址1\n"
             "网址2\n\n"
             "💡 示例:\n"
-            "/addmany 官网\n"
-            "www.example.com\n"
-            "backup.example.com"
+            "/addmany\n"
+            "https://www.example.com\n"
+            "https://www.backup.com\n\n"
+            "✨ 自动从URL提取域名作为站点名称"
         )
         return
 
-    # 提取站点名（可能在第一行或第二行）
+    # 提取URL列表
     if lines[0].startswith("/addmany"):
-        # 检查命令行是否包含站点名
-        cmd_parts = lines[0].split(maxsplit=1)
-        if len(cmd_parts) > 1:
-            # /addmany 站点名 在同一行
-            base_name = cmd_parts[1]
-            urls = lines[1:]
-        else:
-            # 站点名在第二行
-            if len(lines) < 3:
-                await update.message.reply_text("❌ 至少需要提供站点名和一个网址")
-                return
-            base_name = lines[1]
-            urls = lines[2:]
+        urls = lines[1:]
     else:
         await update.message.reply_text("❌ 命令格式错误")
         return
@@ -534,36 +632,45 @@ async def cmd_addmany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # 批量添加站点
+    sites = config.get("sites", [])
     added_sites = []
-    for idx, url in enumerate(urls, start=1):
+
+    for url in urls:
         if not url:
             continue
-        site_name = f"{base_name}-{idx}" if len(urls) > 1 else base_name
-        config.setdefault("sites", []).append({"name": site_name, "url": url})
-        added_sites.append(f"• {site_name} → {url}")
 
+        # 从URL提取域名作为名称
+        domain = extract_domain_from_url(url)
+        # 生成唯一名称（如果重复则自动编号）
+        name = generate_unique_name(domain, sites)
+
+        # 添加到配置
+        sites.append({"name": name, "url": url})
+        added_sites.append(f"• {name} → {url}")
+
+    config["sites"] = sites
     save_config(config)
 
     # 发送成功消息
     success_msg = "✅ 批量添加成功！\n\n" + "\n".join(added_sites) + f"\n\n📊 共添加 {len(added_sites)} 个站点"
     await update.message.reply_text(success_msg)
-    logging.info(f"批量添加 {len(added_sites)} 个站点: {base_name}")
+    logging.info(f"批量添加 {len(added_sites)} 个站点")
 
 
 async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Telegram /deletemany 命令，批量删除监控站点。
+    """Telegram /deletemany 命令，批量删除监控站点（支持URL、域名或名称）。
 
     用法:
     /deletemany
-    站点名1
-    站点名2
-    站点名3
+    网址或域名1
+    网址或域名2
+    网址或域名3
 
     示例:
     /deletemany
-    官网-1
-    官网-2
-    官网-3
+    https://www.example.com
+    backup.com
+    cdn.com-2
     """
     config = load_config()
     chat_id = update.effective_chat.id
@@ -578,56 +685,46 @@ async def cmd_deletemany(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     message_text = update.message.text.strip()
     lines = [line.strip() for line in message_text.split("\n") if line.strip()]
 
-    # 第一行是命令，后续是要删除的站点名
+    # 第一行是命令，后续是要删除的URL或域名
     if len(lines) < 2:
         await update.message.reply_text(
             "📝 用法:\n"
             "/deletemany\n"
-            "站点名1\n"
-            "站点名2\n\n"
+            "网址或域名1\n"
+            "网址或域名2\n\n"
             "💡 示例:\n"
             "/deletemany\n"
-            "官网-1\n"
-            "官网-2"
+            "https://www.example.com\n"
+            "backup.com\n"
+            "cdn.com-2"
         )
         return
 
-    # 提取要删除的站点名列表
+    # 提取要删除的URL/域名列表
     if lines[0].startswith("/deletemany"):
-        # 检查命令行是否包含站点名
-        cmd_parts = lines[0].split(maxsplit=1)
-        if len(cmd_parts) > 1:
-            # /deletemany 站点名 在同一行（兼容旧格式，作为前缀匹配）
-            prefix = cmd_parts[1]
-            delete_names = []
-            # 查找所有匹配前缀的站点
-            sites = config.get("sites", [])
-            for site in sites:
-                site_name = site.get("name", "")
-                if site_name.startswith(f"{prefix}-") and site_name[len(prefix)+1:].isdigit():
-                    delete_names.append(site_name)
-        else:
-            # 站点名在后续行
-            delete_names = lines[1:]
+        delete_list = lines[1:]
     else:
         await update.message.reply_text("❌ 命令格式错误")
         return
 
-    if not delete_names:
-        await update.message.reply_text("❌ 至少需要提供一个站点名")
+    if not delete_list:
+        await update.message.reply_text("❌ 至少需要提供一个网址或域名")
         return
 
     sites = config.get("sites", [])
     deleted_sites = []
     new_sites = []
 
-    # 创建要删除的站点名集合，便于快速查找
-    delete_set = set(delete_names)
-
+    # 遍历所有站点，匹配要删除的项
     for site in sites:
-        site_name = site.get("name", "")
-        if site_name in delete_set:
-            deleted_sites.append(f"• {site_name} → {site.get('url', '')}")
+        should_delete = False
+        for item in delete_list:
+            if match_site_by_url(item, site):
+                should_delete = True
+                break
+
+        if should_delete:
+            deleted_sites.append(f"• {site.get('name', '')} → {site.get('url', '')}")
         else:
             new_sites.append(site)
 
@@ -830,35 +927,39 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📋 <b>可用命令：</b>\n\n"
 
         "➕ <b>添加站点</b>\n"
-        "• /add &#60;名称&#62; &#60;网址&#62;\n"
+        "• /add &#60;网址&#62;\n"
         "  添加单个监控站点\n"
-        "  💡 示例: /add 官网 www.example.com\n\n"
+        "  ✨ 自动从URL提取域名作为名称\n"
+        "  💡 示例: /add https://www.example.com\n"
+        "  结果: example.com → https://www.example.com\n\n"
 
         "📦 <b>批量添加</b>\n"
-        "• /addmany &#60;站点名&#62;\n"
+        "• /addmany\n"
         "  &#60;网址1&#62;\n"
         "  &#60;网址2&#62;\n"
-        "  批量添加监控站点（自动编号）\n"
+        "  批量添加监控站点（自动提取域名）\n"
         "  💡 示例:\n"
-        "  /addmany 官网\n"
-        "  www.a.com\n"
-        "  www.b.com\n"
-        "  结果: 官网-1, 官网-2 ...\n\n"
+        "  /addmany\n"
+        "  https://www.example.com\n"
+        "  https://www.backup.com\n\n"
 
         "➖ <b>删除站点</b>\n"
-        "• /delete &#60;名称&#62;\n"
-        "  删除单个监控站点\n"
-        "  💡 示例: /delete 官网\n\n"
+        "• /delete &#60;网址|域名|名称&#62;\n"
+        "  删除单个监控站点（智能匹配）\n"
+        "  💡 示例:\n"
+        "  /delete https://www.example.com\n"
+        "  /delete example.com\n"
+        "  /delete example.com-2\n\n"
 
         "💥 <b>批量删除</b>\n"
         "• /deletemany\n"
-        "  &#60;站点名1&#62;\n"
-        "  &#60;站点名2&#62;\n"
-        "  批量删除指定站点\n"
+        "  &#60;网址或域名1&#62;\n"
+        "  &#60;网址或域名2&#62;\n"
+        "  批量删除指定站点（智能匹配）\n"
         "  💡 示例:\n"
         "  /deletemany\n"
-        "  官网-1\n"
-        "  官网-2\n\n"
+        "  example.com\n"
+        "  backup.com\n\n"
 
         "📋 <b>查看列表</b>\n"
         "• /list\n"
